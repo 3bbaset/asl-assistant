@@ -1,0 +1,11 @@
+# Same line endings rules for Windows and Linux teammates
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.csv text eol=lf
+
+# Never try to merge or convert these
+*.joblib binary
+*.npz binary
+*.task binary
+*.png binary

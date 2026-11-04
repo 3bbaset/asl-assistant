@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.log
+.DS_Store
+Thumbs.db
+
+# raw camera recordings: large, and they contain people's faces
+*.mp4
+*.avi
+*.mov
+videos/
+recordings/
+
+# editor files
+.vscode/
+.idea/
