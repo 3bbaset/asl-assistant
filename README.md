@@ -48,20 +48,6 @@ Built with four distinct operational modes for learning, typing, word recognitio
 
 ### 3. Real-World Power Bank Survey & Universal Clamp Engineering
 
-#### 3.1 Market Dimension Survey (5,000mAh – 10,000mAh Power Banks)
-
-| Power Bank Model | Capacity | Length (Z) | Width (X) | Thickness (Y) | Fits V9 Universal Cradle? |
-| :--- | :---: | :---: | :---: | :---: | :--- |
-| **Anker Nano 30W (A1259)** | 10,000 mAh | 104.0 mm | 52.3 mm | 26.0 mm | **Yes** (Sliding Clamp + Strap) |
-| **Anker PowerCore (A1257)** | 10,000 mAh | 113.8 mm | 70.6 mm | 16.5 mm | **Yes** (Sliding Clamp Jaws) |
-| **Anker Zolo / A1388** | 10,000 mAh | 151.0 mm | 71.4 mm | 15.9 mm | **Yes** (Open-Top Vertical Channel) |
-| **Anker MagGo (5K)** | 5,000 mAh | 96.0 mm | 69.0 mm | 15.0 mm | **Yes** (Sliding Clamp Jaws) |
-| **Xiaomi Ultra Compact** | 10,000 mAh | 90.0 mm | 63.9 mm | 24.4 mm | **Yes** (Sliding Clamp + Strap) |
-| **Xiaomi 22.5W (PB100DPDZM)** | 10,000 mAh | 147.8 mm | 73.9 mm | 15.3 mm | **Yes** (Max Clamp Width 76 mm) |
-| **INIU Carry (P50-E1)** | 10,000 mAh | 83.0 mm | 52.0 mm | 26.0 mm | **Yes** (Min Clamp Width 50 mm) |
-| **INIU Pocket (P41)** | 10,000 mAh | 110.0 mm | 67.0 mm | 18.0 mm | **Yes** (Sliding Clamp Jaws) |
-| **INIU Ultra-Slim (P75)** | 5,000 mAh | 99.0 mm | 67.0 mm | 9.0 mm | **Yes** (Foam Pad / Strap Tension) |
-
 #### 3.2 4-Stage Universal Power Bank Retention System
 1. **Left Fixed C-Clamp Jaw (X = -58.0 mm inner stop)**: Built into the left side of `ASL_Rear_Shell` with a 4.0 mm wrap-around retention lip (Y = +35.0 to +38.0 mm) that holds the left edge of any power bank (up to 16.5 mm under the hard lip, or up to 26 mm with the strap).
 2. **Sliding & Ratcheting Right Clamp Jaw (`ASL_PowerBank_Clamp`)**:
