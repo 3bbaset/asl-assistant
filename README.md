@@ -2,7 +2,46 @@
 
 An intelligent, real-time American Sign Language (ASL) recognition system supporting webcam video input, real-time MediaPipe hand landmark extraction, machine learning classification, and text-to-speech synthesis.
 
-Built with four distinct operational modes for learning, typing, word recognition, and continuous sentence conversation.
+Built with four distinct operational modes for learning, typing, word recognition, and continuous sentence conversation, along with a custom 3D-printable handheld communicator enclosure.
+
+---
+
+## 3D CAD Enclosure & Hardware Prototype (V9 Design)
+
+The physical device is engineered as a dual-facing, handheld/tabletop communicator enclosure specifically designed for 3D printing (FDM/SLA slicer-ready).
+
+<p align="center">
+  <img src="cad/render_v9_front_3leds.png" width="48%" alt="Front Partner View" />
+  <img src="cad/render_v9_rear_universal_pbank_green_led.png" width="48%" alt="Rear Signer View" />
+</p>
+
+### Enclosure Features
+* **Partner / Listener Facing (Front)**:
+  * **Screen Bezel**: Houses a 2.8"–3.5" LCD/OLED display (e.g. ESP32-CYD) to render typed text and translated sentences.
+  * **Dual Acoustic Grilles**: Hexagonal honeycomb grilles for twin 40 mm speakers delivering clear TTS speech synthesis.
+  * **Status LEDs**: 3 multi-color status LEDs for system power, detection readiness, and active speech indication.
+  * **Ergonomic Side Ribs**: Knurled tactile finger grips for secure handheld operation.
+* **Signer Facing (Rear)**:
+  * **Camera Port**: Recessed camera aperture positioned for optimal wide-angle hand tracking.
+  * **I/O Access Cutouts**: Full access ports for USB, HDMI, 3.5 mm Audio, MicroUSB/USB-C power, and MicroSD card.
+  * **Universal Powerbank Clamp**: Secure rear bracket mounting standard portable battery packs for 100% untethered mobile use.
+
+### Multi-Angle Folding Handle & Tabletop Kickstand
+<p align="center">
+  <img src="cad/render_v9_base_handle_folding.png" width="48%" alt="Folding Handle Kickstand" />
+  <img src="cad/render_v9_base_handle_stowed.png" width="48%" alt="Stowed Transport Position" />
+</p>
+
+* **Tabletop Mode ($45^\circ / 90^\circ$)**: Deploys as a rigid desktop kickstand so the user can sign hands-free during conversations or classroom presentations.
+* **Handheld Wand Mode ($0^\circ$)**: Serves as an ergonomic handle for walking/mobile use.
+* **Stowed Mode**: Folds flush against the communicator body for compact transport.
+
+### 3D CAD Files & Slicer-Ready STLs (in `cad/`)
+* **`cad/asl_front_shell.stl`**: Front shell with screen bezel, dual hex grilles, and LED apertures.
+* **`cad/asl_rear_shell.stl`**: Rear shell with camera mount, I/O cutouts, and powerbank slots.
+* **`cad/asl_ergonomic_handle.stl`**: Folding handle and multi-position kickstand arm.
+* **`cad/asl_powerbank_clamp.stl`**: Quick-release battery pack mounting clamp.
+* **`cad/asl_communicator_model.blend`**: Master Blender 3D CAD source model.
 
 ---
 
@@ -101,9 +140,10 @@ The dynamic word model classifies 30-frame interpolated trajectory clips (1,935 
 * **Model File**: `word_model.joblib` (compressed to 6.4 MB for rapid loading and deployment)
 * **Training Data**: `word_clips.npz` (8.5 MB compressed landmark dataset)
 
-### Performance Evaluation Graphs
-* Confusion Matrix: `confusion_words.png`
-* Scaling Curve: `scaling_curve.png`
+<p align="center">
+  <img src="confusion_words.png" width="48%" alt="Confusion Matrix" />
+  <img src="scaling_curve.png" width="48%" alt="Scaling Curve" />
+</p>
 
 To retrain the word model from `word_clips.npz`:
 ```cmd
@@ -119,13 +159,14 @@ python quiz_words.py
 
 ## File Structure
 
-| File | Description |
+| Directory / File | Description |
 | :--- | :--- |
 | `app.py` | Full desktop application with all 4 operational modes, webcam pipeline, and speech. |
 | `run.bat` | One-click Windows runner that automatically uses the project virtual environment. |
 | `brain.py` | Headless inference engine containing all classification, state machine, and mode logic. |
 | `server.py` | Lightweight HTTP server hosting `Brain` for hardware/Pi clients. |
 | `device.py` | Lightweight client interface for embedded devices (camera capture + display). |
+| `cad/` | 3D printable CAD models (STLs), renders, and Blender scene for the hardware enclosure. |
 | `words_common.py` | Word feature extraction, geometric calculations, and grammar sentence smoothing. |
 | `words_live.py` | Real-time 2-hand word segmenter, classifier interface, and drawing helpers. |
 | `train_words.py` | Training script for the 89.8% accuracy ensemble word model. |
