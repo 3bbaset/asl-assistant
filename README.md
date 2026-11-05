@@ -187,6 +187,7 @@ The dynamic word model classifies 30-frame interpolated trajectory clips (1,935 
   * **Architecture**: Soft-Voting Ensemble (Regularized Logistic Regression + ExtraTrees)
 * **Model File**: `word_model.joblib` (compressed to 6.4 MB for rapid loading and deployment)
 * **Training Data**: `word_clips.npz` (8.5 MB compressed landmark dataset)
+* **Full Vocabulary & Testing Guide**: See [`VOCABULARY.md`](VOCABULARY.md) for how to sign all 18 words, multi-word testing sentences, and alphabet gestures (also see plain list in [`words_list.txt`](words_list.txt)).
 
 <p align="center">
   <img src="confusion_words.png" width="48%" alt="Confusion Matrix" />
@@ -217,6 +218,8 @@ python quiz_words.py
 | `cad/` | 3D printable CAD models (STLs), renders, and Blender scene for the hardware enclosure. |
 | `words_common.py` | Word feature extraction, geometric calculations, and grammar sentence smoothing. |
 | `words_live.py` | Real-time 2-hand word segmenter, classifier interface, and drawing helpers. |
+| `VOCABULARY.md` | Complete testing guide with all 18 words, signing instructions, and sentence combinations. |
+| `words_list.txt` | Plain list of all 18 vocabulary words recognized by the model. |
 | `train_words.py` | Training script for the 89.8% accuracy ensemble word model. |
 | `quiz_words.py` | Interactive split-screen training and reference comparison tool. |
 | `asl_model_v2.joblib` | Trained static letter model (A–Z). |
