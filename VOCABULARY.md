@@ -2,6 +2,10 @@
 
 This document lists all the words, letters, and sentence phrases that the models have been trained and validated upon, along with instructions on how to sign each one for testing.
 
+> [!NOTE]
+> * **High-Accuracy Core Vocabulary (18 words, 89.8% precision)**: Described below in detail with visual signing descriptions and sentence combinations. Plain text list: [`words_core.txt`](words_core.txt).
+> * **Complete 2,021-Word Dataset Vocabulary (Full 2,000+ words)**: For the full dataset catalog extracted across all 106 batches, see the complete alphabetical catalog in [`VOCABULARY_FULL_2021.md`](VOCABULARY_FULL_2021.md) and plain text list in [`words_list.txt`](words_list.txt).
+
 ---
 
 ## 1. Core Word Vocabulary (18 Words — Mode 3: Words & Mode 4: Sentences)
