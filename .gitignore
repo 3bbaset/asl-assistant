@@ -17,3 +17,13 @@ recordings/
 # editor files
 .vscode/
 .idea/
+
+# Large word dataset batches and caches
+hf_files.txt
+hf_broken.txt
+tmp_batch_mp4/
+batches/
+all_clips.npz
+word_model_full_2021.joblib
+training_scaling_log.csv
+full_training_report*.json

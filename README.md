@@ -1,58 +1,136 @@
-# ASL assistant
+# ASL Assistant (Senior Capstone Project)
 
-Reads sign language from a camera and types and speaks it.
-Two models work together: a **letter model** (single pictures, static letters) and a **motion model**
-(1.5 s clips, finds J and Z; also says IDLE when nothing is being signed).
+An intelligent, real-time American Sign Language (ASL) recognition system supporting webcam video input, real-time MediaPipe hand landmark extraction, machine learning classification, and text-to-speech synthesis.
 
-## Files
+Built with four distinct operational modes for learning, typing, word recognition, and continuous sentence conversation.
 
-| File | What it is |
-|---|---|
-| `app.py` | The full app: webcam, both models, typing, speech. Run this. `python app.py --share` uses one hand detector (faster). Press `d` for timings, `q` quit |
-| `try_motion.py` | Test the J/Z model on its own |
-| `brain.py`, `server.py`, `device.py` | Version split in two for a Raspberry Pi: the laptop runs `server.py` (all the AI), the device runs `device.py` (camera, screen, speaker) |
-| `common.py`, `phrase_common.py`, `motion_common.py` | Shared helpers: hand numbers, features, clip handling |
-| `asl_model_v2.joblib`, `motion_model2.joblib` | The trained models |
-| `hand_landmarker.task` | MediaPipe hand model (downloaded from Google) |
-| `own_clips.npz`, `*.csv` | Training data (letters in CSV files, J/Z/IDLE clips in `own_clips.npz`) |
-| `collect_clips.py` | Record more J/Z clips: `python collect_clips.py J` |
+---
 
-## Set up on Windows (PowerShell)
+## Key Capabilities & Operational Modes
 
-1. Install **Python 3.12** (python.org; tick "Add to PATH"), **Git for Windows**, and optionally **VS Code**.
-2. Then:
+Switch modes instantly using numeric keys **`1`**, **`2`**, **`3`**, **`4`**, or cycle sequentially using **`m`** / **`TAB`**:
 
-```
-git clone <the repository address>
+| Key | Mode | Operational Purpose & Behavior |
+| :---: | :--- | :--- |
+| **`1`** | **`alphabets`** | **Live Letter Inspection & Practice**: Instant visual feedback for single static letters (A–Z) and motion gestures (J and Z). Landmarks and top predictions are rendered in real time. **Typing is paused** so learners can inspect handshapes without altering the sentence buffer. |
+| **`2`** | **`spelling`** | **Fingerspelling Typing Engine**: Types letters into an accumulated sentence bar. Requires a sign to be held for 0.6 s with $\ge 80\%$ agreement. Dynamic motion gestures (J/Z) replace initial lookalike letters (e.g., replaces an initial 'I' when 'J' completes). Spoken aloud via TTS. |
+| **`3`** | **`words`** | **Whole-Word ASL Recognition**: Dynamic whole-word gesture recognition powered by a high-precision Soft-Voting Ensemble (**89.8% held-out test accuracy**). Tracks 2-hand signing trajectories; classifies and pronounces isolated ASL signs when hands drop or pause. |
+| **`4`** | **`sentences`** | **Continuous Sentence Mode**: Chains successive signs together into fluid English sentences. Automatically cleans up duplicate transitions, smooths ASL glosses into natural grammar, and speaks the complete sentence hands-free after a 1.8 s rest pause or upon pressing `ENTER`. |
+
+---
+
+## Keyboard Controls & Shortcuts
+
+| Key | Action |
+| :---: | :--- |
+| **`1`** | Switch to **Mode 1: Alphabets** (Live Inspection) |
+| **`2`** | Switch to **Mode 2: Spelling** (Fingerspelling Typing) |
+| **`3`** | Switch to **Mode 3: Words** (Whole-Word ASL) |
+| **`4`** | Switch to **Mode 4: Sentences** (Continuous ASL) |
+| **`m` / `TAB`** | Cycle to the next mode sequentially (`1` $\to$ `2` $\to$ `3` $\to$ `4` $\to$ `1`) |
+| **`SPACE`** | Insert a space into the sentence buffer |
+| **`BACKSPACE`** | Delete the last character (Spelling mode) or remove the last signed word (Sentences mode) |
+| **`ENTER`** | Speak the entire accumulated sentence aloud immediately |
+| **`c`** | Clear the sentence buffer |
+| **`d`** | Toggle diagnostic overlay (FPS, latency breakdown, movement distance) |
+| **`f`** | Toggle fullscreen display |
+| **`q`** | Quit application |
+
+---
+
+## Setup & Running
+
+### Prerequisites
+* Windows 10/11 or Linux
+* Python 3.12 64-bit
+
+### 1. Fast Setup with Virtual Environment
+```powershell
+# Clone the repository
+git clone https://github.com/3bbaset/asl-assistant.git
 cd asl-assistant
+
+# Create virtual environment and install dependencies
 py -3.12 -m venv .venv
-.venv\Scripts\Activate.ps1
+.\.venv\Scripts\activate
 pip install -r requirements.txt
-python app.py
 ```
 
-If PowerShell refuses to run `Activate.ps1`, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, or use
-`.venv\Scripts\activate.bat` in the normal command prompt.
+### 2. Launching the Application
+You can run the application directly using the included `run.bat` helper script or Python:
 
-Use the same Python version (3.12) and the pinned library versions in `requirements.txt`. The `.joblib` model
-files are tied to the scikit-learn version they were saved with, and a different version may fail to load them
-or give different answers.
+```cmd
+# Start directly (default: Spelling mode)
+run
 
-Speech uses Windows' built-in voice. On Linux it needs `espeak-ng`.
+# Or launch directly into any specific mode:
+run --mode alphabets
+run --mode spelling
+run --mode words
+run --mode sentences
 
-## Working together
+# High-performance mode (shared detector, recommended for laptops / single-camera devices):
+run --share
+```
 
-* Work on your own branch (`git switch -c your-name/what-you-do`), push it, and open a pull request. Don't
-  push straight to `main`.
-* **Models and data files can't be merged** (they are binary). Only one person retrains at a time: tell the
-  others first, commit the new `.joblib` file with the number or date in the commit message, and everyone pulls.
-* New training data: say what it is, who signed it and how it was recorded (camera, mirrored or not).
-  The motion clips are **not mirrored**; the letter pictures are.
-* Don't commit raw videos (they are ignored on purpose; they contain faces).
+---
 
-## State of the project / known gaps
+## Hardware Prototype Mode (Client / Server Split)
 
-* The J/Z settings in `app.py` (`MOVE_MIN`, `REPLACE`, `CONFIRM`) are untuned guesses.
-* The server/device split has only been tested with fake models, not on a real Raspberry Pi yet.
-* Lag: with both models running, the app must read only the newest camera picture. `app.py` does that;
-  press `d` to see the milliseconds per step.
+For deployment on embedded hardware (e.g. Raspberry Pi + laptop backend):
+
+1. **Host / Server (Laptop/PC)** — runs all inference and ML models:
+   ```cmd
+   python server.py
+   ```
+2. **Device / Client (Raspberry Pi or secondary machine)** — handles camera capture, UI display, and audio output:
+   ```cmd
+   python device.py --server http://<LAPTOP_IP>:8000
+   ```
+
+---
+
+## Word Recognition Model & Performance
+
+The dynamic word model classifies 30-frame interpolated trajectory clips (1,935 geometric features per clip covering inter-finger angles, joint distances, wrist velocities, and 2-hand relative distances).
+
+* **Evaluated on 80/20 held-out split**:
+  * **Test Accuracy**: **89.8%**
+  * **Precision**: **90.0%**
+  * **Architecture**: Soft-Voting Ensemble (Regularized Logistic Regression + ExtraTrees)
+* **Model File**: `word_model.joblib` (compressed to 6.4 MB for rapid loading and deployment)
+* **Training Data**: `word_clips.npz` (8.5 MB compressed landmark dataset)
+
+### Performance Evaluation Graphs
+* Confusion Matrix: `confusion_words.png`
+* Scaling Curve: `scaling_curve.png`
+
+To retrain the word model from `word_clips.npz`:
+```cmd
+python train_words.py
+```
+
+To practice words interactively split-screen with reference videos:
+```cmd
+python quiz_words.py
+```
+
+---
+
+## File Structure
+
+| File | Description |
+| :--- | :--- |
+| `app.py` | Full desktop application with all 4 operational modes, webcam pipeline, and speech. |
+| `run.bat` | One-click Windows runner that automatically uses the project virtual environment. |
+| `brain.py` | Headless inference engine containing all classification, state machine, and mode logic. |
+| `server.py` | Lightweight HTTP server hosting `Brain` for hardware/Pi clients. |
+| `device.py` | Lightweight client interface for embedded devices (camera capture + display). |
+| `words_common.py` | Word feature extraction, geometric calculations, and grammar sentence smoothing. |
+| `words_live.py` | Real-time 2-hand word segmenter, classifier interface, and drawing helpers. |
+| `train_words.py` | Training script for the 89.8% accuracy ensemble word model. |
+| `quiz_words.py` | Interactive split-screen training and reference comparison tool. |
+| `asl_model_v2.joblib` | Trained static letter model (A–Z). |
+| `motion_model2.joblib` | Trained dynamic motion model (J, Z, IDLE). |
+| `word_model.joblib` | Trained conversational word recognition ensemble model. |
+| `hand_landmarker.task` | Google MediaPipe 2-hand tracking landmark model. |

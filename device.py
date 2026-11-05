@@ -150,9 +150,29 @@ def render(frame, res, status):
     cv2.rectangle(show, (0, 0), (w, 84), (0, 0, 0), -1)
     draw_text(show, res.get("top2") or "-", (12, 36), 0.9)
     draw_text(show, res.get("motion") or "", (12, 74), 0.7, (255, 255, 255))
+
+    mode_raw = res.get("mode", "spelling")
+    mode_names = {
+        "alphabets": "1: ALPHABETS",
+        "spelling": "2: SPELLING",
+        "words": "3: WORDS",
+        "sentences": "4: SENTENCES",
+    }
+    mode_tag = mode_names.get(mode_raw, mode_raw.upper())
+    draw_text(show, f"[{mode_tag}]", (w - 240, 36), 0.7, (0, 220, 255), 2)
+
     cv2.rectangle(show, (0, h - 56), (w, h), (0, 0, 0), -1)
-    draw_text(show, res.get("text", "")[-30:], (12, h - 16), 1.1, (255, 255, 255))
-    draw_text(show, status, (w - 230, 120), 0.6, (0, 165, 255))
+    if mode_raw == "alphabets":
+        display_text = f"Buffer: {res.get('text', '')[-24:]}" if res.get('text') else "(Inspection Mode - typing paused)"
+        draw_text(show, display_text, (12, h - 16), 0.85, (180, 180, 180))
+    elif mode_raw == "sentences":
+        stext = res.get("text", "")
+        display_text = f'Sentence: "{stext}"' if stext else "(Sign successive words...)"
+        draw_text(show, display_text, (12, h - 16), 0.95, (255, 255, 255))
+    else:
+        draw_text(show, res.get("text", "")[-30:], (12, h - 16), 1.1, (255, 255, 255))
+    draw_text(show, "1:Alpha 2:Spell 3:Word 4:Sent | m=cycle", (w - 420, h - 16), 0.55, (0, 255, 180), 1)
+    draw_text(show, status, (w - 230, 74), 0.6, (0, 165, 255))
     return show
 
 
@@ -237,6 +257,16 @@ def main():
                     cmd = "speak"
                 elif k == ord("c"):
                     cmd = "clear"
+                elif k in (ord("m"), 9):
+                    cmd = "mode"
+                elif k == ord("1"):
+                    cmd = "mode_alphabets"
+                elif k == ord("2"):
+                    cmd = "mode_spelling"
+                elif k == ord("3"):
+                    cmd = "mode_words"
+                elif k == ord("4"):
+                    cmd = "mode_sentences"
                 elif k == ord("f"):
                     fullscreen = not fullscreen
                     cv2.setWindowProperty("ASL device", cv2.WND_PROP_FULLSCREEN,
