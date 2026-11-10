@@ -265,6 +265,7 @@ def handle_touch(x, y):
 def handle_cmd(line):
     line = line.strip()
     if not line: return
+    sys.stdout.write("ACK: " + line + "\n")
     for part in line.split(";"):
         if ":" in part:
             k, v = part.split(":", 1)
@@ -279,6 +280,8 @@ def handle_cmd(line):
             elif k == "led":
                 set_led(v.lower())
 
+import select
+
 print("ESP32_ASL_V9_ONLINE")
 
 # Pre-allocated image buffer (5,400 bytes = 60x45 RGB565)
@@ -286,8 +289,8 @@ img_buffer = bytearray(5400)
 line_buffer = bytearray(128)
 line_len = 0
 
-# Use direct non-blocking UART0 access
-uart0 = UART(0, baudrate=115200)
+poll_obj = select.poll()
+poll_obj.register(sys.stdin, select.POLLIN)
 
 while True:
     # 1. Check Touch Screen
@@ -295,27 +298,29 @@ while True:
     if pt:
         handle_touch(pt[0], pt[1])
 
-    # 2. Check incoming UART0 (USB)
-    if uart0.any():
-        c = uart0.read(1)
+    # 2. Check incoming USB (sys.stdin)
+    if poll_obj.poll(0):
+        c = sys.stdin.read(1)
         if c:
-            if c == b"\n":
+            if c == "\n":
                 line_str = bytes(line_buffer[:line_len]).decode("utf-8", "ignore").strip()
                 line_len = 0
                 if line_str.startswith("IMG:5400"):
-                    # Read exactly 5,400 raw bytes with timeout
                     bytes_read = 0
                     t_start = time.ticks_ms()
                     while bytes_read < 5400 and time.ticks_diff(time.ticks_ms(), t_start) < 200:
-                        n = uart0.readinto(memoryview(img_buffer)[bytes_read:])
-                        if n:
-                            bytes_read += n
+                        chunk = sys.stdin.buffer.read(5400 - bytes_read)
+                        if chunk:
+                            img_buffer[bytes_read:bytes_read+len(chunk)] = chunk
+                            bytes_read += len(chunk)
+                        else:
+                            time.sleep_ms(2)
                     if bytes_read == 5400:
                         blit_cam_60x45(img_buffer)
                 else:
                     handle_cmd(line_str)
-            elif c != b"\r" and line_len < 120:
-                line_buffer[line_len] = c[0]
+            elif c != "\r" and line_len < 120:
+                line_buffer[line_len] = ord(c)
                 line_len += 1
 
     # 3. Check incoming Pi UART (IO22)
