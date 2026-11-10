@@ -47,12 +47,27 @@ class ESP32Bridge:
         self.baud = baud
         self.ser = None
         try:
-            self.ser = serial.Serial(port, baud, timeout=0.1)
+            self.ser = serial.Serial(port, baud, timeout=0.02)
             self.ser.dtr = False
             self.ser.rts = False
             print(f"[ESP32] Connected on {port}")
         except Exception as e:
-            print(f"[ESP32] Note: Direct USB port {port} not opened ({e}). Will rely on Pi UART.")
+            print(f"[ESP32] Note: Direct USB port {port} not opened ({e}).")
+
+    def send_frame(self, frame_bgr):
+        """Sends downsampled RGB565 frame to display in the ESP32 camera viewport."""
+        if not (self.ser and self.ser.is_open):
+            return
+        try:
+            small = cv2.resize(frame_bgr, (120, 90))
+            r = (small[:, :, 2] >> 3).astype(np.uint16)
+            g = (small[:, :, 1] >> 2).astype(np.uint16)
+            b = (small[:, :, 0] >> 3).astype(np.uint16)
+            rgb565 = ((r << 11) | (g << 5) | b).byteswap().tobytes()
+            header = f"IMG:{len(rgb565)}\n".encode("ascii")
+            self.ser.write(header + rgb565)
+        except Exception:
+            pass
 
     def send(self, mode=None, text=None, sub=None, led=None):
         parts = []
@@ -67,6 +82,19 @@ class ESP32Bridge:
                 self.ser.write(msg.encode("utf-8"))
             except Exception:
                 pass
+
+    def poll_touch(self):
+        """Checks for touch events sent from the physical ESP32 touchscreen."""
+        if not (self.ser and self.ser.is_open):
+            return None
+        try:
+            if self.ser.in_waiting:
+                line = self.ser.readline().decode("utf-8", "ignore").strip()
+                if line:
+                    return line
+        except Exception:
+            pass
+        return None
 
     def close(self):
         if self.ser and self.ser.is_open:
@@ -206,6 +234,17 @@ def main():
                 frames = 0
                 t_fps = time.time()
 
+            # 1. Check for hardware touch commands from ESP32 screen
+            t_cmd = esp.poll_touch()
+            if t_cmd:
+                if t_cmd.startswith("CMD:MODE:"):
+                    m = t_cmd.split(":", 2)[2].strip()
+                    b.set_mode(m)
+                    print(f"[Hardware Touch Screen] Mode -> {m.upper()}")
+                elif t_cmd == "CMD:CLEAR":
+                    b.command("clear")
+                    print("[Hardware Touch Screen] Buffer Cleared")
+
             res = b.process(frame)
 
             # Check if text or mode updated
@@ -219,11 +258,7 @@ def main():
             if res.get("say"):
                 speak(res["say"])
 
-            # Send update to ESP32 screen
-            sub_msg = f"{fps:.0f} FPS | Hand: {'YES' if res.get('hand') else 'NO'}"
-            esp.send(mode=current_mode, text=current_text[:18], sub=sub_msg, led=led_color)
-
-            # Render UI on PC window
+            # Render UI with hand skeleton
             h, w = frame.shape[:2]
             preview = cv2.flip(frame, 1)
 
@@ -234,6 +269,14 @@ def main():
                     cv2.line(preview, pts[p1], pts[p2], (0, 255, 0), 2)
                 for pt in pts:
                     cv2.circle(preview, pt, 4, (0, 0, 255), -1)
+
+            # 2. Stream camera viewport frame to ESP32 (every 2nd frame)
+            if frames % 2 == 0:
+                esp.send_frame(preview)
+
+            # 3. Send text and status update to ESP32 screen
+            sub_msg = f"{fps:.0f} FPS | Hand: {'YES' if res.get('hand') else 'NO'}"
+            esp.send(mode=current_mode, text=current_text[:16], sub=sub_msg, led=led_color)
 
             # Overlay banners
             cv2.rectangle(preview, (0, 0), (w, 60), (15, 23, 42), -1)
