@@ -1,14 +1,18 @@
-"""esp32_firmware.py - Robust, Crash-Proof ASL Communicator V9 Firmware
+"""esp32_firmware.py - Production-Grade ASL Communicator V9 Firmware
 
 Features:
-  - 60x45 RGB565 Live Camera Viewport (scaled 2x to 120x90 on screen)
-  - Real-time ASL Word & Sentence Captions
-  - Interactive Resistive Touch Buttons (Mode switching & Clear)
-  - RGB Status LED
-  - Non-blocking, watchdog-safe FreeRTOS loop
+  - 32x24 RGB565 Live Camera Viewport (scaled 4x to 128x96 via native emitter, ~38ms render)
+  - Row-packet streaming with read_exact and kbd_intr(-1)
+  - Interactive Touch Screen Mode Tabs (ALPHA, SPELL, WORDS, SENT) & Clear (CLR)
+  - High-visibility ASL Word & Subtitle Captions
+  - RGB Status LED (Green = Hand Tracked, Blue = Ready, Yellow = Connecting)
+  - CMD:REPL maintenance command for effortless firmware flashing
 """
+import micropython
+micropython.kbd_intr(-1) # Disable Ctrl-C capture so binary bytes never interrupt!
+
 from machine import Pin, SPI, SoftSPI, UART
-import time, struct, framebuf, sys
+import time, struct, framebuf, sys, select
 
 # ---------------- Hardware Pins (ESP32-2432S028R) ----------------
 bl = Pin(21, Pin.OUT, value=1)
@@ -17,17 +21,18 @@ led_g = Pin(16, Pin.OUT, value=1)
 led_b = Pin(17, Pin.OUT, value=0) # Blue on boot
 
 def set_led(color):
-    if color == "green":
+    c = color.lower()
+    if c == "green":
         led_r.value(1); led_g.value(0); led_b.value(1)
-    elif color == "yellow":
+    elif c == "yellow":
         led_r.value(0); led_g.value(0); led_b.value(1)
-    elif color == "red":
+    elif c == "red":
         led_r.value(0); led_g.value(1); led_b.value(1)
-    elif color == "blue":
+    elif c == "blue":
         led_r.value(1); led_g.value(1); led_b.value(0)
-    elif color == "cyan":
+    elif c == "cyan":
         led_r.value(1); led_g.value(0); led_b.value(0)
-    else:
+    elif c == "off":
         led_r.value(1); led_g.value(1); led_b.value(1)
 
 # ILI9341 Display on HSPI (SPI 1)
@@ -125,26 +130,37 @@ cs_touch = Pin(33, Pin.OUT, value=1)
 irq_touch = Pin(36, Pin.IN)
 spi_touch = SoftSPI(baudrate=1000000, polarity=0, phase=0, sck=sck_touch, mosi=mosi_touch, miso=miso_touch)
 
+def read_channel(cmd):
+    cs_touch.value(0)
+    spi_touch.write(bytes([cmd]))
+    v = int.from_bytes(spi_touch.read(2), "big") >> 3
+    cs_touch.value(1)
+    return v
+
 def read_touch():
+    # Only read if IRQ is low (active touch) or quick Z1 check
     if irq_touch.value() == 0:
-        cs_touch.value(0)
-        spi_touch.write(b"\x90")
-        rx = int.from_bytes(spi_touch.read(2), "big") >> 3
-        spi_touch.write(b"\xd0")
-        ry = int.from_bytes(spi_touch.read(2), "big") >> 3
-        cs_touch.value(1)
-        # 320x240 calibration
-        x = max(0, min(319, (rx - 300) * 320 // 3500))
-        y = max(0, min(239, (ry - 300) * 240 // 3500))
+        is_pressed = True
+    else:
+        z1 = read_channel(0xB0)
+        is_pressed = (z1 > 60)
+    
+    if is_pressed:
+        raw_y = read_channel(0x90) # Y-channel
+        raw_x = read_channel(0xD0) # X-channel
+        if raw_x == 0 and raw_y == 4095:
+            return None
+        # Map to landscape 320x240
+        x = max(0, min(319, (raw_y - 250) * 320 // 3550))
+        y = max(0, min(239, (raw_x - 300) * 240 // 3500))
         return x, y
     return None
 
 # ---------------- UI Layout & State ----------------
-# 60x45 native image scaled 2x to 120x90 in the screen center
-CAM_W = 120
-CAM_H = 90
-CAM_X = 100
-CAM_Y = 38
+CAM_W = 128
+CAM_H = 96
+CAM_X = 96
+CAM_Y = 36
 
 MODES = [("ALPHA", 4, 74), ("SPELL", 82, 74), ("WORDS", 160, 74), ("SENT", 238, 78)]
 current_mode = "words"
@@ -152,45 +168,53 @@ current_text = ""
 current_sub = ""
 
 def render_mode_bar(active):
+    global current_mode
+    current_mode = active.lower()
     for name, x, w in MODES:
-        is_active = (name.lower() == active.lower() or
-                     (name == "ALPHA" and active == "alphabets") or
-                     (name == "SENT" and active in ("sentence", "sentences")) or
-                     (name == "WORDS" and active == "words") or
-                     (name == "SPELL" and active == "spelling"))
+        is_active = (name.lower() == current_mode or
+                     (name == "ALPHA" and current_mode.startswith("alpha")) or
+                     (name == "SENT" and current_mode.startswith("sent")) or
+                     (name == "WORDS" and current_mode == "words") or
+                     (name == "SPELL" and current_mode == "spelling"))
         fg = 0x0000 if is_active else 0x9CD3
         bg = 0x266B if is_active else 0x1947
         draw_text_box(x, 4, w, 28, name, fg, bg, scale=1)
 
-# Pre-allocated line buffer for scaling 60 pixels to 120 pixels (240 bytes)
-scale_line = bytearray(120 * 2)
+# Pre-allocated line buffer for scaling 32 pixels to 128 pixels (256 bytes)
+scale_line = bytearray(128 * 2)
 
-def blit_cam_60x45(raw_5400):
-    """Takes 60x45 RGB565 (5,400 bytes) and blits scaled 2x to 120x90 on screen."""
+@micropython.native
+def scale_row_32_to_128(src, dst):
+    d_idx = 0
+    for col in range(32):
+        b0 = src[col * 2]
+        b1 = src[col * 2 + 1]
+        dst[d_idx] = b0; dst[d_idx+1] = b1
+        dst[d_idx+2] = b0; dst[d_idx+3] = b1
+        dst[d_idx+4] = b0; dst[d_idx+5] = b1
+        dst[d_idx+6] = b0; dst[d_idx+7] = b1
+        d_idx += 8
+
+def blit_single_row(row_idx, row_bytes_64):
+    """Blits one 32-pixel row scaled 4x vertically and horizontally (128x4 pixels)"""
+    y_start = CAM_Y + row_idx * 4
+    scale_row_32_to_128(row_bytes_64, scale_line)
     tft_cmd(0x2A, struct.pack(">HH", CAM_X, CAM_X + CAM_W - 1))
-    tft_cmd(0x2B, struct.pack(">HH", CAM_Y, CAM_Y + CAM_H - 1))
+    tft_cmd(0x2B, struct.pack(">HH", y_start, y_start + 3))
     cs_tft.value(0); dc_tft.value(0)
     spi_tft.write(b"\x2C")
     dc_tft.value(1)
-    for row in range(45):
-        row_offset = row * 60 * 2
-        idx = 0
-        for col in range(60):
-            p0 = raw_5400[row_offset + col*2]
-            p1 = raw_5400[row_offset + col*2 + 1]
-            scale_line[idx] = p0; scale_line[idx+1] = p1
-            scale_line[idx+2] = p0; scale_line[idx+3] = p1
-            idx += 4
-        # Write line twice for 2x vertical scale
-        spi_tft.write(scale_line)
-        spi_tft.write(scale_line)
+    spi_tft.write(scale_line)
+    spi_tft.write(scale_line)
+    spi_tft.write(scale_line)
+    spi_tft.write(scale_line)
     cs_tft.value(1)
 
 def update_caption(text=None, sub=None):
     global current_text, current_sub
     if text is not None and text != current_text:
         current_text = text
-        fill_rect(10, 134, 235, 48, 0x10E4)
+        fill_rect(10, 136, 235, 46, 0x10E4)
         disp = text if text else "READY"
         draw_text_box(14, 140, 227, 36, disp[:16], 0xFFFF, 0x10E4, scale=2)
     if sub is not None and sub != current_sub:
@@ -201,7 +225,7 @@ def update_caption(text=None, sub=None):
 def init_screen():
     init_tft()
     fill_rect(0, 0, 320, 240, 0x08A5)
-    fill_rect(0, 0, 320, 36, 0x0F17)
+    fill_rect(0, 0, 320, 34, 0x0F17)
     render_mode_bar("words")
 
     # Border for camera preview
@@ -209,20 +233,20 @@ def init_screen():
     fill_rect(CAM_X, CAM_Y, CAM_W, CAM_H, 0x0000)
 
     # Caption card
-    fill_rect(10, 134, 235, 74, 0x10E4)
+    fill_rect(10, 136, 235, 72, 0x10E4)
     update_caption("READY TO SIGN", "Camera & AI Linked")
 
     # Clear button [CLR]
-    fill_rect(252, 134, 58, 74, 0x8000)
-    draw_text_box(252, 150, 58, 40, "CLR", 0xFFFF, 0x8000, scale=2)
+    fill_rect(252, 136, 58, 72, 0x8000)
+    draw_text_box(252, 152, 58, 40, "CLR", 0xFFFF, 0x8000, scale=2)
 
     # Footer
-    fill_rect(0, 212, 320, 28, 0x0F17)
-    draw_text_box(10, 216, 300, 20, "V9 PORTABLE COMMUNICATOR", 0x266B, 0x0F17, scale=1)
+    fill_rect(0, 214, 320, 26, 0x0F17)
+    draw_text_box(10, 218, 300, 18, "V9 PORTABLE COMMUNICATOR", 0x266B, 0x0F17, scale=1)
 
 init_screen()
 
-# UART from Pi
+# UART to Raspberry Pi
 uart_pi = UART(2, baudrate=115200, tx=Pin(27), rx=Pin(22), timeout=2)
 
 def send_to_host(msg):
@@ -237,11 +261,11 @@ last_touch_time = 0
 def handle_touch(x, y):
     global last_touch_time, current_mode
     now = time.ticks_ms()
-    if time.ticks_diff(now, last_touch_time) < 400:
+    if time.ticks_diff(now, last_touch_time) < 300:
         return
     last_touch_time = now
 
-    if y <= 40:
+    if y <= 38:
         if x < 80:
             current_mode = "alphabets"
             render_mode_bar("alphabets")
@@ -258,14 +282,16 @@ def handle_touch(x, y):
             current_mode = "sentences"
             render_mode_bar("sentences")
             send_to_host("CMD:MODE:sentences")
-    elif x >= 245 and y >= 130:
+    elif x >= 240 and y >= 130:
         update_caption("", "Buffer Cleared")
         send_to_host("CMD:CLEAR")
 
 def handle_cmd(line):
     line = line.strip()
     if not line: return
-    sys.stdout.write("ACK: " + line + "\n")
+    if line == "CMD:REPL":
+        micropython.kbd_intr(3)
+        sys.exit()
     for part in line.split(";"):
         if ":" in part:
             k, v = part.split(":", 1)
@@ -278,55 +304,73 @@ def handle_cmd(line):
             elif k == "sub":
                 update_caption(sub=v)
             elif k == "led":
-                set_led(v.lower())
-
-import select
+                set_led(v)
 
 print("ESP32_ASL_V9_ONLINE")
 
-# Pre-allocated image buffer (5,400 bytes = 60x45 RGB565)
-img_buffer = bytearray(5400)
-line_buffer = bytearray(128)
-line_len = 0
-
 poll_obj = select.poll()
-poll_obj.register(sys.stdin, select.POLLIN)
+poll_obj.register(sys.stdin.buffer, select.POLLIN)
+
+line_buf = bytearray(128)
+line_len = 0
+last_touch_check = 0
+
+def read_exact(n, timeout_ms=35):
+    buf = bytearray(n)
+    idx = 0
+    t0 = time.ticks_ms()
+    while idx < n and time.ticks_diff(time.ticks_ms(), t0) < timeout_ms:
+        if poll_obj.poll(3):
+            chunk = sys.stdin.buffer.read(min(n - idx, 64))
+            if chunk:
+                buf[idx:idx+len(chunk)] = chunk
+                idx += len(chunk)
+    return buf if idx == n else None
 
 while True:
-    # 1. Check Touch Screen
-    pt = read_touch()
-    if pt:
-        handle_touch(pt[0], pt[1])
+    now = time.ticks_ms()
 
-    # 2. Check incoming USB (sys.stdin)
+    # 1. Check Touch Screen every 40ms
+    if time.ticks_diff(now, last_touch_check) >= 40:
+        last_touch_check = now
+        pt = read_touch()
+        if pt:
+            handle_touch(pt[0], pt[1])
+
+    # 2. Check incoming USB (sys.stdin.buffer)
     if poll_obj.poll(0):
-        c = sys.stdin.read(1)
-        if c:
-            if c == "\n":
-                line_str = bytes(line_buffer[:line_len]).decode("utf-8", "ignore").strip()
-                line_len = 0
-                if line_str.startswith("IMG:5400"):
-                    bytes_read = 0
-                    t_start = time.ticks_ms()
-                    while bytes_read < 5400 and time.ticks_diff(time.ticks_ms(), t_start) < 200:
-                        chunk = sys.stdin.buffer.read(5400 - bytes_read)
-                        if chunk:
-                            img_buffer[bytes_read:bytes_read+len(chunk)] = chunk
-                            bytes_read += len(chunk)
-                        else:
-                            time.sleep_ms(2)
-                    if bytes_read == 5400:
-                        blit_cam_60x45(img_buffer)
-                else:
-                    handle_cmd(line_str)
-            elif c != "\r" and line_len < 120:
-                line_buffer[line_len] = ord(c)
-                line_len += 1
+        b = sys.stdin.buffer.read(1)
+        if b:
+            if b == b"L":
+                # Row packet: 1 byte row_idx + 64 bytes pixel data = 65 bytes
+                pkt = read_exact(65, timeout_ms=35)
+                if pkt is not None:
+                    row_id = pkt[0]
+                    if row_id < 24:
+                        blit_single_row(row_id, pkt[1:])
+                        if row_id == 23:
+                            sys.stdout.write("IMG_OK\n")
+            elif b in (b"\n", b"\r"):
+                if line_len > 0:
+                    cmd_str = bytes(line_buf[:line_len]).decode("utf-8", "ignore").strip()
+                    line_len = 0
+                    if cmd_str.startswith("SET:"):
+                        handle_cmd(cmd_str[4:])
+                    else:
+                        handle_cmd(cmd_str)
+            else:
+                if line_len < 120:
+                    line_buf[line_len] = b[0]
+                    line_len += 1
 
     # 3. Check incoming Pi UART (IO22)
     if uart_pi.any():
         p_line = uart_pi.readline()
         if p_line:
-            handle_cmd(p_line.decode("utf-8", "ignore"))
+            cmd = p_line.decode("utf-8", "ignore").strip()
+            if cmd.startswith("SET:"):
+                handle_cmd(cmd[4:])
+            else:
+                handle_cmd(cmd)
 
-    time.sleep_ms(2)
+    time.sleep_ms(1)

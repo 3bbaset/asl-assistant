@@ -49,6 +49,7 @@ class ESP32Bridge:
         self.running = True
         self.touch_queue = []
         self.lock = threading.Lock()
+        self.ready_for_frame = True
 
         # State mailbox
         self.pending_frame = None
@@ -96,10 +97,12 @@ class ESP32Bridge:
         return None
 
     def _worker(self):
-        last_frame_sent = 0
-        last_sent_text = ""
-        last_sent_mode = ""
-        last_sent_led = ""
+        last_frame_sent = 0.0
+        last_sent_text = None
+        last_sent_sub = None
+        last_sent_mode = None
+        last_sent_led = None
+        ready_for_frame = True
 
         while self.running:
             if not (self.ser and self.ser.is_open):
@@ -107,12 +110,21 @@ class ESP32Bridge:
                 continue
 
             try:
-                # 1. Read touch events from screen
-                if self.ser.in_waiting:
+                # 1. Read touch events and frame ACKs from ESP32
+                while self.ser.in_waiting:
                     line = self.ser.readline().decode("utf-8", "ignore").strip()
-                    if line.startswith("CMD:"):
+                    if not line:
+                        continue
+                    if line in ("IMG_OK", "IMG_ERR"):
+                        ready_for_frame = True
+                    elif line.startswith("CMD:"):
                         with self.lock:
                             self.touch_queue.append(line)
+
+                now = time.time()
+                # Safety timeout: unlock ready_for_frame if ACK was lost
+                if not ready_for_frame and (now - last_frame_sent) > 0.40:
+                    ready_for_frame = True
 
                 # 2. Check if text/mode/led changed
                 with self.lock:
@@ -121,32 +133,40 @@ class ESP32Bridge:
                     cur_mode = self.pending_mode
                     cur_led = self.pending_led
                     cur_frame = self.pending_frame
-                    self.pending_frame = None
 
-                if (cur_text != last_sent_text or cur_mode != last_sent_mode or cur_led != last_sent_led) and cur_text is not None:
+                if cur_text != last_sent_text or cur_sub != last_sent_sub or cur_mode != last_sent_mode or cur_led != last_sent_led:
                     parts = []
                     if cur_mode: parts.append(f"mode:{cur_mode}")
                     if cur_text is not None: parts.append(f"text:{cur_text}")
                     if cur_sub is not None: parts.append(f"sub:{cur_sub}")
                     if cur_led: parts.append(f"led:{cur_led}")
-                    msg = ";".join(parts) + "\n"
-                    self.ser.write(msg.encode("utf-8"))
-                    last_sent_text = cur_text
-                    last_sent_mode = cur_mode
-                    last_sent_led = cur_led
+                    if parts:
+                        msg = "SET:" + ";".join(parts) + "\n"
+                        self.ser.write(msg.encode("utf-8"))
+                        self.ser.flush()
+                        last_sent_text = cur_text
+                        last_sent_sub = cur_sub
+                        last_sent_mode = cur_mode
+                        last_sent_led = cur_led
 
-                # 3. Stream 60x45 camera frame at ~6 FPS
-                now = time.time()
-                if cur_frame is not None and (now - last_frame_sent) >= 0.16:
+                # 3. Stream 32x24 camera frame via 24 row packets (~5 FPS)
+                if ready_for_frame and cur_frame is not None and (now - last_frame_sent) >= 0.18:
+                    ready_for_frame = False
                     last_frame_sent = now
-                    small = cv2.resize(cur_frame, (60, 45))
+                    # Resize to 32x24
+                    small = cv2.resize(cur_frame, (32, 24))
                     r = (small[:, :, 2] >> 3).astype(np.uint16)
                     g = (small[:, :, 1] >> 2).astype(np.uint16)
                     b = (small[:, :, 0] >> 3).astype(np.uint16)
                     rgb565 = ((r << 11) | (g << 5) | b).byteswap().tobytes()
-                    self.ser.write(b"IMG:5400\n" + rgb565)
+                    # Transmit 24 rows (66 bytes each)
+                    for row in range(24):
+                        chunk = rgb565[row * 64 : (row + 1) * 64]
+                        self.ser.write(b"L" + bytes([row]) + chunk)
+                        time.sleep(0.0015) # 1.5ms pacing
+                    self.ser.flush()
 
-                time.sleep(0.01)
+                time.sleep(0.005)
             except Exception:
                 time.sleep(0.05)
 
@@ -326,7 +346,8 @@ def main():
                     cv2.circle(preview, pt, 4, (0, 0, 255), -1)
 
             # 2. Asynchronously update ESP32 screen (camera viewport, caption, and LED)
-            sub_msg = f"{fps:.0f} FPS | Hand: {'YES' if res.get('hand') else 'NO'}"
+            hand_status = "YES" if res.get("hand") else "NO"
+            sub_msg = f"Hand: {hand_status} | {b.mode.upper()}"
             esp.update(frame_bgr=preview, mode=current_mode, text=current_text[:16], sub=sub_msg, led=led_color)
 
             # Overlay banners
