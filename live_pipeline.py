@@ -46,57 +46,112 @@ class ESP32Bridge:
         self.port = port
         self.baud = baud
         self.ser = None
+        self.running = True
+        self.touch_queue = []
+        self.lock = threading.Lock()
+
+        # State mailbox
+        self.pending_frame = None
+        self.pending_text = None
+        self.pending_sub = None
+        self.pending_mode = None
+        self.pending_led = None
+
         try:
-            self.ser = serial.Serial(port, baud, timeout=0.02)
+            self.ser = serial.Serial()
+            self.ser.port = port
+            self.ser.baudrate = baud
             self.ser.dtr = False
             self.ser.rts = False
-            print(f"[ESP32] Connected on {port}")
+            self.ser.timeout = 0.05
+            self.ser.open()
+            print(f"[ESP32] Connected on {port} (Asynchronous Thread Active)")
+            time.sleep(1.2) # Allow ESP32 to finish boot cleanly
         except Exception as e:
             print(f"[ESP32] Note: Direct USB port {port} not opened ({e}).")
 
-    def send_frame(self, frame_bgr):
-        """Sends downsampled RGB565 frame to display in the ESP32 camera viewport."""
-        if not (self.ser and self.ser.is_open):
-            return
-        try:
-            small = cv2.resize(frame_bgr, (120, 90))
-            r = (small[:, :, 2] >> 3).astype(np.uint16)
-            g = (small[:, :, 1] >> 2).astype(np.uint16)
-            b = (small[:, :, 0] >> 3).astype(np.uint16)
-            rgb565 = ((r << 11) | (g << 5) | b).byteswap().tobytes()
-            header = f"IMG:{len(rgb565)}\n".encode("ascii")
-            self.ser.write(header + rgb565)
-        except Exception:
-            pass
+        self.worker_thread = threading.Thread(target=self._worker, daemon=True)
+        self.worker_thread.start()
+
+    def update(self, frame_bgr=None, mode=None, text=None, sub=None, led=None):
+        with self.lock:
+            if frame_bgr is not None:
+                self.pending_frame = frame_bgr
+            if mode is not None:
+                self.pending_mode = mode
+            if text is not None:
+                self.pending_text = text
+            if sub is not None:
+                self.pending_sub = sub
+            if led is not None:
+                self.pending_led = led
 
     def send(self, mode=None, text=None, sub=None, led=None):
-        parts = []
-        if mode: parts.append(f"MODE:{mode}")
-        if text: parts.append(f"TEXT:{text}")
-        if sub:  parts.append(f"SUB:{sub}")
-        if led:  parts.append(f"LED:{led}")
-        if not parts: return
-        msg = ";".join(parts) + "\n"
-        if self.ser and self.ser.is_open:
-            try:
-                self.ser.write(msg.encode("utf-8"))
-            except Exception:
-                pass
+        self.update(mode=mode, text=text, sub=sub, led=led)
 
     def poll_touch(self):
-        """Checks for touch events sent from the physical ESP32 touchscreen."""
-        if not (self.ser and self.ser.is_open):
-            return None
-        try:
-            if self.ser.in_waiting:
-                line = self.ser.readline().decode("utf-8", "ignore").strip()
-                if line:
-                    return line
-        except Exception:
-            pass
+        with self.lock:
+            if self.touch_queue:
+                return self.touch_queue.pop(0)
         return None
 
+    def _worker(self):
+        last_frame_sent = 0
+        last_sent_text = ""
+        last_sent_mode = ""
+        last_sent_led = ""
+
+        while self.running:
+            if not (self.ser and self.ser.is_open):
+                time.sleep(0.05)
+                continue
+
+            try:
+                # 1. Read touch events from screen
+                if self.ser.in_waiting:
+                    line = self.ser.readline().decode("utf-8", "ignore").strip()
+                    if line.startswith("CMD:"):
+                        with self.lock:
+                            self.touch_queue.append(line)
+
+                # 2. Check if text/mode/led changed
+                with self.lock:
+                    cur_text = self.pending_text
+                    cur_sub = self.pending_sub
+                    cur_mode = self.pending_mode
+                    cur_led = self.pending_led
+                    cur_frame = self.pending_frame
+                    self.pending_frame = None
+
+                if (cur_text != last_sent_text or cur_mode != last_sent_mode or cur_led != last_sent_led) and cur_text is not None:
+                    parts = []
+                    if cur_mode: parts.append(f"mode:{cur_mode}")
+                    if cur_text is not None: parts.append(f"text:{cur_text}")
+                    if cur_sub is not None: parts.append(f"sub:{cur_sub}")
+                    if cur_led: parts.append(f"led:{cur_led}")
+                    msg = ";".join(parts) + "\n"
+                    self.ser.write(msg.encode("utf-8"))
+                    last_sent_text = cur_text
+                    last_sent_mode = cur_mode
+                    last_sent_led = cur_led
+
+                # 3. Stream 60x45 camera frame at ~6 FPS
+                now = time.time()
+                if cur_frame is not None and (now - last_frame_sent) >= 0.16:
+                    last_frame_sent = now
+                    small = cv2.resize(cur_frame, (60, 45))
+                    r = (small[:, :, 2] >> 3).astype(np.uint16)
+                    g = (small[:, :, 1] >> 2).astype(np.uint16)
+                    b = (small[:, :, 0] >> 3).astype(np.uint16)
+                    rgb565 = ((r << 11) | (g << 5) | b).byteswap().tobytes()
+                    self.ser.write(b"IMG:5400\n" + rgb565)
+
+                time.sleep(0.01)
+            except Exception:
+                time.sleep(0.05)
+
     def close(self):
+        self.running = False
         if self.ser and self.ser.is_open:
             self.ser.close()
 
@@ -270,13 +325,9 @@ def main():
                 for pt in pts:
                     cv2.circle(preview, pt, 4, (0, 0, 255), -1)
 
-            # 2. Stream camera viewport frame to ESP32 (every 2nd frame)
-            if frames % 2 == 0:
-                esp.send_frame(preview)
-
-            # 3. Send text and status update to ESP32 screen
+            # 2. Asynchronously update ESP32 screen (camera viewport, caption, and LED)
             sub_msg = f"{fps:.0f} FPS | Hand: {'YES' if res.get('hand') else 'NO'}"
-            esp.send(mode=current_mode, text=current_text[:16], sub=sub_msg, led=led_color)
+            esp.update(frame_bgr=preview, mode=current_mode, text=current_text[:16], sub=sub_msg, led=led_color)
 
             # Overlay banners
             cv2.rectangle(preview, (0, 0), (w, 60), (15, 23, 42), -1)

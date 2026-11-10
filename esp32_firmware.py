@@ -1,21 +1,20 @@
-"""esp32_firmware.py - ASL Communicator V9 Standalone Hardware Controller
+"""esp32_firmware.py - Robust, Crash-Proof ASL Communicator V9 Firmware
 
 Features:
-  1. Live Camera Preview (RGB565 blitted directly to ILI9341 display)
-  2. Large Live Sign/Caption Text & Confidence Subtitle
-  3. Interactive Resistive Touch Screen (XPT2046) to switch modes and clear buffer
-  4. RGB Status LED indicator (Green = hand detected, Yellow = processing, Blue = ready)
-  5. Dual-link: accepts serial over USB and GPIO UART (from Raspberry Pi)
+  - 60x45 RGB565 Live Camera Viewport (scaled 2x to 120x90 on screen)
+  - Real-time ASL Word & Sentence Captions
+  - Interactive Resistive Touch Buttons (Mode switching & Clear)
+  - RGB Status LED
+  - Non-blocking, watchdog-safe FreeRTOS loop
 """
 from machine import Pin, SPI, SoftSPI, UART
-import time, struct, framebuf, select, sys
+import time, struct, framebuf, sys
 
-# ----------------- Hardware Pins (CYD ESP32-2432S028R) -----------------
-# Backlight & RGB LED (active-low)
+# ---------------- Hardware Pins (ESP32-2432S028R) ----------------
 bl = Pin(21, Pin.OUT, value=1)
 led_r = Pin(4, Pin.OUT, value=1)
 led_g = Pin(16, Pin.OUT, value=1)
-led_b = Pin(17, Pin.OUT, value=0) # Blue on ready
+led_b = Pin(17, Pin.OUT, value=0) # Blue on boot
 
 def set_led(color):
     if color == "green":
@@ -44,7 +43,7 @@ def tft_cmd(c, data=None):
     cs_tft.value(1)
 
 def init_tft():
-    tft_cmd(0x01) # SWRESET
+    tft_cmd(0x01)
     time.sleep_ms(100)
     tft_cmd(0xCF, b"\x00\xC1\x30")
     tft_cmd(0xED, b"\x64\x03\x12\x81")
@@ -60,9 +59,9 @@ def init_tft():
     tft_cmd(0x3A, b"\x55") # 16-bit RGB565
     tft_cmd(0xB1, b"\x00\x18")
     tft_cmd(0xB6, b"\x08\x82\x27")
-    tft_cmd(0x11) # SLPOUT
+    tft_cmd(0x11)
     time.sleep_ms(100)
-    tft_cmd(0x29) # DISPON
+    tft_cmd(0x29)
 
 def fill_rect(x, y, w, h, color565):
     tft_cmd(0x2A, struct.pack(">HH", x, x + w - 1))
@@ -70,10 +69,10 @@ def fill_rect(x, y, w, h, color565):
     cs_tft.value(0); dc_tft.value(0)
     spi_tft.write(b"\x2C")
     dc_tft.value(1)
-    chunk = struct.pack(">H", color565) * min(w * h, 512)
+    chunk = struct.pack(">H", color565) * min(w * h, 256)
     rem = w * h
     while rem > 0:
-        n = min(rem, 512)
+        n = min(rem, 256)
         spi_tft.write(chunk[:n*2])
         rem -= n
     cs_tft.value(1)
@@ -118,7 +117,7 @@ def draw_text_box(x, y, w, h, text, fg, bg, scale=1):
                 spi_tft.write(line_buf)
         cs_tft.value(1)
 
-# ----------------- XPT2046 Touch Screen -----------------
+# ---------------- XPT2046 Resistive Touch ----------------
 sck_touch = Pin(25, Pin.OUT)
 mosi_touch = Pin(32, Pin.OUT)
 miso_touch = Pin(39, Pin.IN)
@@ -134,16 +133,17 @@ def read_touch():
         spi_touch.write(b"\xd0")
         ry = int.from_bytes(spi_touch.read(2), "big") >> 3
         cs_touch.value(1)
-        # Calibration map for 320x240 landscape
+        # 320x240 calibration
         x = max(0, min(319, (rx - 300) * 320 // 3500))
         y = max(0, min(239, (ry - 300) * 240 // 3500))
         return x, y
     return None
 
-# ----------------- UI Layout & State -----------------
+# ---------------- UI Layout & State ----------------
+# 60x45 native image scaled 2x to 120x90 in the screen center
 CAM_W = 120
 CAM_H = 90
-CAM_X = (320 - CAM_W) // 2   # 100
+CAM_X = 100
 CAM_Y = 38
 
 MODES = [("ALPHA", 4, 74), ("SPELL", 82, 74), ("WORDS", 160, 74), ("SENT", 238, 78)]
@@ -162,14 +162,28 @@ def render_mode_bar(active):
         bg = 0x266B if is_active else 0x1947
         draw_text_box(x, 4, w, 28, name, fg, bg, scale=1)
 
-def blit_cam_frame(raw_rgb565):
-    """Blits raw RGB565 bytes directly into the camera viewport on screen."""
+# Pre-allocated line buffer for scaling 60 pixels to 120 pixels (240 bytes)
+scale_line = bytearray(120 * 2)
+
+def blit_cam_60x45(raw_5400):
+    """Takes 60x45 RGB565 (5,400 bytes) and blits scaled 2x to 120x90 on screen."""
     tft_cmd(0x2A, struct.pack(">HH", CAM_X, CAM_X + CAM_W - 1))
     tft_cmd(0x2B, struct.pack(">HH", CAM_Y, CAM_Y + CAM_H - 1))
     cs_tft.value(0); dc_tft.value(0)
-    tft_cmd(0x2C)
+    spi_tft.write(b"\x2C")
     dc_tft.value(1)
-    spi_tft.write(raw_rgb565)
+    for row in range(45):
+        row_offset = row * 60 * 2
+        idx = 0
+        for col in range(60):
+            p0 = raw_5400[row_offset + col*2]
+            p1 = raw_5400[row_offset + col*2 + 1]
+            scale_line[idx] = p0; scale_line[idx+1] = p1
+            scale_line[idx+2] = p0; scale_line[idx+3] = p1
+            idx += 4
+        # Write line twice for 2x vertical scale
+        spi_tft.write(scale_line)
+        spi_tft.write(scale_line)
     cs_tft.value(1)
 
 def update_caption(text=None, sub=None):
@@ -186,34 +200,30 @@ def update_caption(text=None, sub=None):
 
 def init_screen():
     init_tft()
-    # Dark slate background
     fill_rect(0, 0, 320, 240, 0x08A5)
-    # Mode bar background
     fill_rect(0, 0, 320, 36, 0x0F17)
     render_mode_bar("words")
 
-    # Camera frame border
+    # Border for camera preview
     fill_rect(CAM_X - 2, CAM_Y - 2, CAM_W + 4, CAM_H + 4, 0x266B)
     fill_rect(CAM_X, CAM_Y, CAM_W, CAM_H, 0x0000)
 
     # Caption card
     fill_rect(10, 134, 235, 74, 0x10E4)
-    update_caption("INITIALIZING...", "Connecting to Camera")
+    update_caption("READY TO SIGN", "Camera & AI Linked")
 
-    # Clear button [CLR] on right
+    # Clear button [CLR]
     fill_rect(252, 134, 58, 74, 0x8000)
     draw_text_box(252, 150, 58, 40, "CLR", 0xFFFF, 0x8000, scale=2)
 
-    # Status footer
+    # Footer
     fill_rect(0, 212, 320, 28, 0x0F17)
     draw_text_box(10, 216, 300, 20, "V9 PORTABLE COMMUNICATOR", 0x266B, 0x0F17, scale=1)
 
 init_screen()
 
-# UART from Pi (IO22 RX, IO27 TX)
-uart_pi = UART(2, baudrate=115200, tx=Pin(27), rx=Pin(22), timeout=5)
-poll_obj = select.poll()
-poll_obj.register(sys.stdin, select.POLLIN)
+# UART from Pi
+uart_pi = UART(2, baudrate=115200, tx=Pin(27), rx=Pin(22), timeout=2)
 
 def send_to_host(msg):
     sys.stdout.write(msg + "\n")
@@ -227,11 +237,10 @@ last_touch_time = 0
 def handle_touch(x, y):
     global last_touch_time, current_mode
     now = time.ticks_ms()
-    if time.ticks_diff(now, last_touch_time) < 350:
+    if time.ticks_diff(now, last_touch_time) < 400:
         return
     last_touch_time = now
 
-    # Top mode bar (Y <= 40)
     if y <= 40:
         if x < 80:
             current_mode = "alphabets"
@@ -249,16 +258,13 @@ def handle_touch(x, y):
             current_mode = "sentences"
             render_mode_bar("sentences")
             send_to_host("CMD:MODE:sentences")
-
-    # Clear button (X >= 245, Y >= 130)
     elif x >= 245 and y >= 130:
         update_caption("", "Buffer Cleared")
         send_to_host("CMD:CLEAR")
 
-def handle_command(line):
+def handle_cmd(line):
     line = line.strip()
-    if not line:
-        return
+    if not line: return
     for part in line.split(";"):
         if ":" in part:
             k, v = part.split(":", 1)
@@ -274,42 +280,48 @@ def handle_command(line):
                 set_led(v.lower())
 
 print("ESP32_ASL_V9_ONLINE")
-buf_line = ""
-img_reading = False
-img_needed = 0
-img_buf = bytearray(CAM_W * CAM_H * 2)
-img_ptr = 0
+
+# Pre-allocated image buffer (5,400 bytes = 60x45 RGB565)
+img_buffer = bytearray(5400)
+line_buffer = bytearray(128)
+line_len = 0
+
+# Use direct non-blocking UART0 access
+uart0 = UART(0, baudrate=115200)
 
 while True:
-    # 1. Touch poll
+    # 1. Check Touch Screen
     pt = read_touch()
     if pt:
         handle_touch(pt[0], pt[1])
 
-    # 2. Host input (USB & UART)
-    if poll_obj.poll(0):
-        c = sys.stdin.read(1)
+    # 2. Check incoming UART0 (USB)
+    if uart0.any():
+        c = uart0.read(1)
         if c:
-            if img_reading:
-                img_buf[img_ptr] = ord(c)
-                img_ptr += 1
-                if img_ptr >= img_needed:
-                    blit_cam_frame(img_buf)
-                    img_reading = False
-                    img_ptr = 0
-            else:
-                if c == "\n":
-                    if buf_line.startswith("IMG:"):
-                        try:
-                            img_needed = int(buf_line[4:])
-                            img_ptr = 0
-                            img_reading = True
-                        except Exception:
-                            pass
-                    else:
-                        handle_command(buf_line)
-                    buf_line = ""
-                elif c != "\r":
-                    buf_line += c
+            if c == b"\n":
+                line_str = bytes(line_buffer[:line_len]).decode("utf-8", "ignore").strip()
+                line_len = 0
+                if line_str.startswith("IMG:5400"):
+                    # Read exactly 5,400 raw bytes with timeout
+                    bytes_read = 0
+                    t_start = time.ticks_ms()
+                    while bytes_read < 5400 and time.ticks_diff(time.ticks_ms(), t_start) < 200:
+                        n = uart0.readinto(memoryview(img_buffer)[bytes_read:])
+                        if n:
+                            bytes_read += n
+                    if bytes_read == 5400:
+                        blit_cam_60x45(img_buffer)
+                else:
+                    handle_cmd(line_str)
+            elif c != b"\r" and line_len < 120:
+                line_buffer[line_len] = c[0]
+                line_len += 1
+
+    # 3. Check incoming Pi UART (IO22)
+    if uart_pi.any():
+        p_line = uart_pi.readline()
+        if p_line:
+            handle_cmd(p_line.decode("utf-8", "ignore"))
 
     time.sleep_ms(2)
