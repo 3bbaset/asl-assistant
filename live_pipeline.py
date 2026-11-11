@@ -1,396 +1,347 @@
-"""live_pipeline.py - Complete End-to-End ASL Communicator Pipeline.
+"""live_pipeline.py - ASL Communicator V10 background engine.
 
-Architecture:
-  [Pi Camera OV5647] -> [Raspberry Pi 2B] -> [Direct Ethernet Link] -> [Laptop AI Brain]
-                                                                                |
-  [ESP32 2.8" Screen & LEDs] <- [UART IO22/27 & USB COM15] <-------------------+
-                               + [Windows TTS Speech Engine] <------------------+
+The hardware is the product:
+  [Pi Camera] -> [Raspberry Pi] --ethernet--> [this laptop: recognition only]
+  [ESP32 touch screen] <--USB serial--> [this laptop]
+
+Everything the user does happens on the ESP32 screen (mode tabs, SPACE, DEL,
+CLEAR, SPEAK). The laptop runs headless; pass --gui to see a debug window.
+
+Run:  .venv\\Scripts\\python.exe live_pipeline.py [--gui] [--esp-port COM14]
 """
-import sys
-import os
-import time
-import socket
-import threading
-import subprocess
 import argparse
-import paramiko
-import serial
+import os
+import subprocess
+import threading
+import time
+
 import cv2
 import numpy as np
+import paramiko
+import serial
+from serial.tools import list_ports
 
-def speak(s):
-    """Speaks text asynchronously via Windows TTS."""
-    s = "".join(ch for ch in s if ch.isalnum() or ch == " ")
-    if not s.strip():
-        return
-    try:
-        cmd = ["powershell", "-NoProfile", "-Command",
-               f"Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('{s}')"]
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         creationflags=0x08000000 if os.name == "nt" else 0)
-    except Exception:
-        pass
-
-# ASL Recognition Modules
 import common
-import brain
 import server
 
-PI_HOST = "fe80::76bf:bb6e:2582:f5e9%3"
-PI_USER = "pi"
-PI_PASS = "raspberry"
-PI_PORT = 8888
+PI_HOSTS = ["169.254.83.50", "fe80::76bf:bb6e:2582:f5e9%3", "raspberrypi.local"]
+PI_USER, PI_PASS, PI_PORT = "pi", "raspberry", 8888
+MODES = ("alphabets", "spelling", "words", "sentences")
 
-class ESP32Bridge:
-    def __init__(self, port="COM15", baud=115200):
-        self.port = port
-        self.baud = baud
-        self.ser = None
-        self.running = True
-        self.touch_queue = []
-        self.lock = threading.Lock()
-        self.ready_for_frame = True
 
-        # State mailbox
-        self.pending_frame = None
-        self.pending_text = None
-        self.pending_sub = None
-        self.pending_mode = None
-        self.pending_led = None
+def log(tag, msg):
+    print(f"{time.strftime('%H:%M:%S')} [{tag}] {msg}", flush=True)
 
+
+# ---------------------------------------------------------------- speech
+class Speaker:
+    """One persistent PowerShell speech process, fed through stdin (no per-word startup lag)."""
+    def __init__(self):
+        self.p = None
         try:
-            self.ser = serial.Serial()
-            self.ser.port = port
-            self.ser.baudrate = baud
-            self.ser.dtr = False
-            self.ser.rts = False
-            self.ser.timeout = 0.05
-            self.ser.open()
-            print(f"[ESP32] Connected on {port} (Asynchronous Thread Active)")
-            time.sleep(1.2) # Allow ESP32 to finish boot cleanly
+            self.p = subprocess.Popen(
+                ["powershell", "-NoProfile", "-Command",
+                 "Add-Type -AssemblyName System.Speech;"
+                 "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+                 "while(($l=[Console]::In.ReadLine()) -ne $null){ if($l.Trim()){ $s.Speak($l) } }"],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                text=True, creationflags=0x08000000 if os.name == "nt" else 0)
         except Exception as e:
-            print(f"[ESP32] Note: Direct USB port {port} not opened ({e}).")
+            log("TTS", f"unavailable: {e}")
 
-        self.worker_thread = threading.Thread(target=self._worker, daemon=True)
-        self.worker_thread.start()
-
-    def update(self, frame_bgr=None, mode=None, text=None, sub=None, led=None):
-        with self.lock:
-            if frame_bgr is not None:
-                self.pending_frame = frame_bgr
-            if mode is not None:
-                self.pending_mode = mode
-            if text is not None:
-                self.pending_text = text
-            if sub is not None:
-                self.pending_sub = sub
-            if led is not None:
-                self.pending_led = led
-
-    def send(self, mode=None, text=None, sub=None, led=None):
-        self.update(mode=mode, text=text, sub=sub, led=led)
-
-    def poll_touch(self):
-        with self.lock:
-            if self.touch_queue:
-                return self.touch_queue.pop(0)
-        return None
-
-    def _worker(self):
-        last_frame_sent = 0.0
-        last_sent_text = None
-        last_sent_sub = None
-        last_sent_mode = None
-        last_sent_led = None
-        ready_for_frame = True
-
-        while self.running:
-            if not (self.ser and self.ser.is_open):
-                time.sleep(0.05)
-                continue
-
+    def say(self, s):
+        s = "".join(ch for ch in s if ch.isalnum() or ch in " '").strip()
+        if s and self.p and self.p.poll() is None:
             try:
-                # 1. Read touch events and frame ACKs from ESP32
-                while self.ser.in_waiting:
-                    line = self.ser.readline().decode("utf-8", "ignore").strip()
-                    if not line:
-                        continue
-                    if line in ("IMG_OK", "IMG_ERR"):
-                        ready_for_frame = True
-                    elif line.startswith("CMD:"):
-                        with self.lock:
-                            self.touch_queue.append(line)
-
-                now = time.time()
-                # Safety timeout: unlock ready_for_frame if ACK was lost
-                if not ready_for_frame and (now - last_frame_sent) > 0.40:
-                    ready_for_frame = True
-
-                # 2. Check if text/mode/led changed
-                with self.lock:
-                    cur_text = self.pending_text
-                    cur_sub = self.pending_sub
-                    cur_mode = self.pending_mode
-                    cur_led = self.pending_led
-                    cur_frame = self.pending_frame
-
-                if cur_text != last_sent_text or cur_sub != last_sent_sub or cur_mode != last_sent_mode or cur_led != last_sent_led:
-                    parts = []
-                    if cur_mode: parts.append(f"mode:{cur_mode}")
-                    if cur_text is not None: parts.append(f"text:{cur_text}")
-                    if cur_sub is not None: parts.append(f"sub:{cur_sub}")
-                    if cur_led: parts.append(f"led:{cur_led}")
-                    if parts:
-                        msg = "SET:" + ";".join(parts) + "\n"
-                        self.ser.write(msg.encode("utf-8"))
-                        self.ser.flush()
-                        last_sent_text = cur_text
-                        last_sent_sub = cur_sub
-                        last_sent_mode = cur_mode
-                        last_sent_led = cur_led
-
-                # 3. Stream 32x24 camera frame via 24 row packets (~5 FPS)
-                if ready_for_frame and cur_frame is not None and (now - last_frame_sent) >= 0.18:
-                    ready_for_frame = False
-                    last_frame_sent = now
-                    # Resize to 32x24
-                    small = cv2.resize(cur_frame, (32, 24))
-                    r = (small[:, :, 2] >> 3).astype(np.uint16)
-                    g = (small[:, :, 1] >> 2).astype(np.uint16)
-                    b = (small[:, :, 0] >> 3).astype(np.uint16)
-                    rgb565 = ((r << 11) | (g << 5) | b).byteswap().tobytes()
-                    # Transmit 24 rows (66 bytes each)
-                    for row in range(24):
-                        chunk = rgb565[row * 64 : (row + 1) * 64]
-                        self.ser.write(b"L" + bytes([row]) + chunk)
-                        time.sleep(0.0015) # 1.5ms pacing
-                    self.ser.flush()
-
-                time.sleep(0.005)
+                self.p.stdin.write(s + "\n"); self.p.stdin.flush()
             except Exception:
-                time.sleep(0.05)
+                pass
+
+    def close(self):
+        if self.p:
+            self.p.kill()
+
+
+# ---------------------------------------------------------------- ESP32 link
+def find_esp_port():
+    for p in list_ports.comports():
+        if "CH340" in (p.description or "") or (p.vid == 0x1A86):
+            return p.device
+    return None
+
+
+class ESP32Link:
+    """Background thread: keeps the serial port open, sends state, collects touch commands."""
+    def __init__(self, port=None):
+        self.fixed_port = port
+        self.ser = None
+        self.lock = threading.Lock()
+        self.state = {}
+        self.sent = {}
+        self.commands = []
+        self.running = True
+        self.last_send = 0.0
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def set(self, **kw):
+        with self.lock:
+            for k, v in kw.items():
+                v = str(v).replace("|", "/").replace("\n", " ")
+                self.state[k] = v
+
+    def pop_commands(self):
+        with self.lock:
+            c, self.commands = self.commands, []
+        return c
+
+    def raw(self, line):
+        if self.ser:
+            try:
+                self.ser.write((line + "\n").encode())
+            except Exception:
+                pass
+
+    def _open(self):
+        port = self.fixed_port or find_esp_port()
+        if not port:
+            return False
+        try:
+            s = serial.Serial()
+            s.port, s.baudrate, s.timeout = port, 115200, 0
+            s.dtr = False; s.rts = False          # do not reset the board
+            s.open()
+            self.ser = s
+            self.sent = {}
+            log("ESP32", f"connected on {port}")
+            return True
+        except Exception as e:
+            log("ESP32", f"cannot open {port}: {e}")
+            return False
+
+    def _run(self):
+        buf = b""
+        while self.running:
+            if self.ser is None:
+                if not self._open():
+                    time.sleep(2); continue
+            try:
+                data = self.ser.read(256)
+                if data:
+                    buf += data
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        line = line.decode("utf-8", "ignore").strip()
+                        if line.startswith("CMD:"):
+                            with self.lock:
+                                self.commands.append(line[4:])
+                        elif line in ("READY", "CAL:OK"):
+                            log("ESP32", line); self.sent = {}
+                with self.lock:
+                    diff = {k: v for k, v in self.state.items() if self.sent.get(k) != v}
+                now = time.time()
+                if diff or now - self.last_send > 1.0:  # changes immediately, heartbeat every 1 s
+                    payload = diff if diff else {"c": self.state.get("c", "0")}
+                    msg = "S|" + "|".join(f"{k}={v}" for k, v in payload.items()) + "\n"
+                    self.ser.write(msg.encode("utf-8"))
+                    self.sent.update(payload)
+                    self.last_send = now
+                time.sleep(0.02)
+            except Exception as e:
+                log("ESP32", f"link lost ({e}); reconnecting")
+                try:
+                    self.ser.close()
+                except Exception:
+                    pass
+                self.ser = None
+                time.sleep(1)
 
     def close(self):
         self.running = False
-        if self.ser and self.ser.is_open:
-            self.ser.close()
+        if self.ser:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
 
-class PiCameraStream:
-    def __init__(self, host=PI_HOST, user=PI_USER, password=PI_PASS, port=PI_PORT):
-        self.host = host
-        self.user = user
-        self.password = password
-        self.port = port
-        self.ssh = None
-        self.chan = None
-        self.running = True
-        self.frame = None
+
+# ---------------------------------------------------------------- Pi camera
+class PiCamera:
+    """SSH to the Pi, run rpicam-vid as an MJPEG TCP server, tunnel it, decode frames.
+    Reconnects automatically if the stream stalls."""
+    def __init__(self):
+        self.frame, self.frame_time = None, 0.0
         self.lock = threading.Lock()
-
-        print("[Pi] Connecting to Raspberry Pi 2 via SSH...")
-        self.ssh = paramiko.SSHClient()
-        self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        self.ssh.connect(self.host, username=self.user, password=self.password, timeout=6)
-        print("[Pi] Connected! Starting CSI camera pipeline...")
-
-        # Kill any prior rpicam instances
-        self.ssh.exec_command("killall -9 rpicam-vid 2>/dev/null")
-        time.sleep(0.3)
-
-        # Start rpicam-vid TCP server on port 8888
-        def _cam_worker():
-            cmd = f"rpicam-vid -t 0 --codec mjpeg --width 640 --height 480 --framerate 30 -l -o tcp://127.0.0.1:{self.port} --nopreview"
-            self.ssh.exec_command(cmd)
-
-        self.cam_thread = threading.Thread(target=_cam_worker, daemon=True)
-        self.cam_thread.start()
-        time.sleep(2.0)
-
-        # Connect direct-tcpip channel through SSH
-        transport = self.ssh.get_transport()
-        self.chan = transport.open_channel("direct-tcpip", dest_addr=("127.0.0.1", self.port), src_addr=("127.0.0.1", 0))
-        print("[Pi] Camera stream channel open and listening at 30 FPS.")
-
-        self.stream_thread = threading.Thread(target=_stream_reader, args=(self,), daemon=True)
-        self.stream_thread.start()
+        self.running = True
+        self.ssh = None
+        threading.Thread(target=self._run, daemon=True).start()
 
     def latest(self):
         with self.lock:
-            f = self.frame
-        return f
+            return self.frame, self.frame_time
 
-    def send_uart(self, line):
-        if self.ssh:
-            # Escape and send to /dev/serial0
-            self.ssh.exec_command(f'echo "{line}" > /dev/serial0 2>/dev/null')
+    def ok(self):
+        return time.time() - self.frame_time < 1.5
+
+    def _connect(self):
+        for host in PI_HOSTS:
+            try:
+                ssh = paramiko.SSHClient()
+                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                ssh.connect(host, username=PI_USER, password=PI_PASS, timeout=5,
+                            banner_timeout=5, auth_timeout=5)
+                log("Pi", f"SSH connected ({host})")
+                return ssh
+            except Exception:
+                continue
+        return None
+
+    def _run(self):
+        while self.running:
+            self.ssh = self._connect()
+            if not self.ssh:
+                log("Pi", "not reachable, retrying in 3 s"); time.sleep(3); continue
+            try:
+                self.ssh.exec_command("pkill -9 rpicam-vid; sleep 0.3; nohup rpicam-vid -t 0 -n "
+                                      "--codec mjpeg --width 640 --height 480 --framerate 30 -l "
+                                      f"-o tcp://127.0.0.1:{PI_PORT} >/dev/null 2>&1 &")
+                chan = None
+                for _ in range(20):
+                    time.sleep(0.3)
+                    try:
+                        chan = self.ssh.get_transport().open_channel(
+                            "direct-tcpip", ("127.0.0.1", PI_PORT), ("127.0.0.1", 0))
+                        break
+                    except Exception:
+                        pass
+                if chan is None:
+                    raise RuntimeError("camera server did not start")
+                chan.settimeout(3.0)
+                log("Pi", "camera stream live")
+                self._read(chan)
+            except Exception as e:
+                log("Pi", f"stream error: {e}")
+            try:
+                self.ssh.exec_command("pkill -9 rpicam-vid")
+                self.ssh.close()
+            except Exception:
+                pass
+            time.sleep(1)
+
+    def _read(self, chan):
+        buf = b""
+        while self.running:
+            data = chan.recv(65536)
+            if not data:
+                raise RuntimeError("stream closed")
+            buf += data
+            while True:
+                a = buf.find(b"\xff\xd8")
+                if a < 0:
+                    buf = buf[-1:]; break
+                b = buf.find(b"\xff\xd9", a + 2)
+                if b < 0:
+                    buf = buf[a:]; break
+                jpg, buf = buf[a:b + 2], buf[b + 2:]
+                img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+                if img is not None:
+                    with self.lock:
+                        self.frame, self.frame_time = img, time.time()
 
     def close(self):
         self.running = False
-        if self.chan:
-            self.chan.close()
-        if self.ssh:
-            self.ssh.exec_command("killall -9 rpicam-vid 2>/dev/null")
-            self.ssh.close()
-
-def _stream_reader(streamer):
-    buf = b""
-    while streamer.running:
         try:
-            data = streamer.chan.recv(8192)
-            if not data:
-                time.sleep(0.01)
-                continue
-            buf += data
-            while True:
-                start = buf.find(b"\xff\xd8")
-                if start == -1:
-                    buf = buf[-2:]
-                    break
-                end = buf.find(b"\xff\xd9", start + 2)
-                if end == -1:
-                    buf = buf[start:]
-                    break
-                jpg = buf[start:end+2]
-                buf = buf[end+2:]
-                img = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
-                if img is not None:
-                    with streamer.lock:
-                        streamer.frame = img
+            self.ssh.exec_command("pkill -9 rpicam-vid"); self.ssh.close()
         except Exception:
-            time.sleep(0.05)
+            pass
+
+
+# ---------------------------------------------------------------- main loop
+def apply_command(b, c, speaker):
+    if c.startswith("MODE:"):
+        m = c[5:].strip()
+        b.set_mode(m)
+        log("Device", f"mode -> {b.mode}" + ("" if b.mode == m else f" (requested {m}, unavailable)"))
+    elif c == "SPACE":
+        b.command("space")
+    elif c == "DEL":
+        b.command("backspace")
+    elif c == "CLEAR":
+        b.command("clear")
+    elif c == "SPEAK":
+        b.command("speak")
+    log("Device", c) if not c.startswith("MODE:") else None
+
 
 def main():
-    parser = argparse.ArgumentParser(description="ASL Communicator Live System")
-    parser.add_argument("--mode", default="words", choices=["alphabets", "spelling", "words", "sentences"])
-    parser.add_argument("--esp-port", default="COM15")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description="ASL Communicator background engine")
+    ap.add_argument("--mode", default="spelling", choices=MODES)
+    ap.add_argument("--esp-port", default=None, help="default: auto-detect CH340")
+    ap.add_argument("--gui", action="store_true", help="show a debug camera window on the laptop")
+    args = ap.parse_args()
 
-    esp = ESP32Bridge(port=args.esp_port)
-    esp.send(mode=args.mode, text="STARTING...", sub="Connecting Camera", led="yellow")
+    esp = ESP32Link(args.esp_port)
+    esp.set(m=args.mode, t="", h=0, c=0, g="", i="Starting engine...")
+    speaker = Speaker()
+    cam = PiCamera()
 
-    cam = PiCameraStream()
-    print("[AI] Loading ASL Neural Models (Alphabet, Dynamic J/Z, and Words)...")
+    log("AI", "loading models...")
     b = server.build_real_brain()
-    b.mode = args.mode
-    print(f"[AI] Models loaded! Initial mode: {b.mode.upper()}")
+    b.set_mode(args.mode)
+    log("AI", f"ready, mode={b.mode}. Control everything from the device screen. Ctrl+C to stop.")
 
-    cv2.namedWindow("ASL Communicator V9 - Live System", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("ASL Communicator V9 - Live System", 960, 720)
-
-    last_text = ""
-    last_led = ""
-    t_fps = time.time()
-    frames = 0
-    fps = 30.0
-
-    print("\n" + "="*60)
-    print("ASL COMMUNICATOR V9 IS LIVE!")
-    print("Keyboard shortcuts in camera window:")
-    print("  '1': Alphabets mode (Single-letter inspection)")
-    print("  '2': Spelling mode (Fingerspelling word buffer)")
-    print("  '3': Words mode (Whole-word dynamic signs)")
-    print("  '4': Sentences mode (Continuous multi-word grammar)")
-    print("  'c': Clear sentence/word buffer")
-    print("  'q': Quit")
-    print("="*60 + "\n")
-
-    esp.send(mode=b.mode, text="READY TO SIGN", sub="Tracking Active", led="green")
-
+    last_ts, fps, n, t0 = 0.0, 0.0, 0, time.time()
     try:
         while True:
-            frame = cam.latest()
-            if frame is None:
-                time.sleep(0.01)
+            for c in esp.pop_commands():
+                apply_command(b, c, speaker)
+
+            frame, ts = cam.latest()
+            if frame is None or ts == last_ts:
+                if not cam.ok():
+                    esp.set(c=0, h=0, m=b.mode, i="Waiting for camera...")
+                time.sleep(0.005)
                 continue
-
-            frames += 1
-            if time.time() - t_fps >= 1.0:
-                fps = frames / (time.time() - t_fps)
-                frames = 0
-                t_fps = time.time()
-
-            # 1. Check for hardware touch commands from ESP32 screen
-            t_cmd = esp.poll_touch()
-            if t_cmd:
-                if t_cmd.startswith("CMD:MODE:"):
-                    m = t_cmd.split(":", 2)[2].strip()
-                    b.set_mode(m)
-                    print(f"[Hardware Touch Screen] Mode -> {m.upper()}")
-                elif t_cmd == "CMD:CLEAR":
-                    b.command("clear")
-                    print("[Hardware Touch Screen] Buffer Cleared")
+            last_ts = ts
 
             res = b.process(frame)
+            n += 1
+            if time.time() - t0 >= 1.0:
+                fps, n, t0 = n / (time.time() - t0), 0, time.time()
 
-            # Check if text or mode updated
-            current_text = res.get("text", "") or res.get("top2", "")
-            current_mode = b.mode
-            led_color = "green" if res.get("hand") else "blue"
-
-            # Trigger TTS speech if engine produced a spoken token
-            if res.get("typed"):
-                speak(res["typed"])
+            if res.get("typed") and b.mode in ("words", "sentences", "alphabets"):
+                speaker.say(res["typed"])
             if res.get("say"):
-                speak(res["say"])
+                speaker.say(res["say"])
 
-            # Render UI with hand skeleton
-            h, w = frame.shape[:2]
-            preview = cv2.flip(frame, 1)
+            hand = bool(res.get("hand"))
+            guess = res.get("letter") or ""
+            if b.mode in ("words", "sentences"):
+                guess = ""
+            hint = res.get("top2") or res.get("motion") or ""
+            esp.set(m=b.mode, t=res.get("text", ""), h=int(hand), c=1, g=guess,
+                    i=f"{hint}"[:39])
 
-            # Draw hand skeleton if detected
-            if res.get("hand"):
-                pts = [(int((1 - x) * w), int(y * h)) for x, y in res["hand"]]
-                for p1, p2 in common.CONNECTIONS:
-                    cv2.line(preview, pts[p1], pts[p2], (0, 255, 0), 2)
-                for pt in pts:
-                    cv2.circle(preview, pt, 4, (0, 0, 255), -1)
-
-            # 2. Asynchronously update ESP32 screen (camera viewport, caption, and LED)
-            hand_status = "YES" if res.get("hand") else "NO"
-            sub_msg = f"Hand: {hand_status} | {b.mode.upper()}"
-            esp.update(frame_bgr=preview, mode=current_mode, text=current_text[:16], sub=sub_msg, led=led_color)
-
-            # Overlay banners
-            cv2.rectangle(preview, (0, 0), (w, 60), (15, 23, 42), -1)
-            cv2.putText(preview, f"MODE: {b.mode.upper()}  |  {fps:.1f} FPS", (15, 40),
-                        cv2.FONT_HERSHEY_DUPLEX, 0.8, (0, 220, 255), 2)
-
-            cv2.rectangle(preview, (0, h - 70), (w, h), (15, 23, 42), -1)
-            disp_txt = current_text if current_text else "(No sign in view)"
-            cv2.putText(preview, disp_txt, (15, h - 25),
-                        cv2.FONT_HERSHEY_DUPLEX, 1.0, (255, 255, 255), 2)
-
-            cv2.imshow("ASL Communicator V9 - Live System", preview)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                break
-            elif key == ord('1'):
-                b.set_mode("alphabets")
-                esp.send(mode="alphabets", sub="Mode: Alphabets")
-            elif key == ord('2'):
-                b.set_mode("spelling")
-                esp.send(mode="spelling", sub="Mode: Spelling")
-            elif key == ord('3'):
-                b.set_mode("words")
-                esp.send(mode="words", sub="Mode: Words")
-            elif key == ord('4'):
-                b.set_mode("sentences")
-                esp.send(mode="sentences", sub="Mode: Sentences")
-            elif key == ord('c'):
-                b.command("clear")
-                esp.send(text="", sub="Buffer Cleared")
-            elif key == ord(' '):
-                b.command("space")
-            elif key == 8: # Backspace
-                b.command("backspace")
-            elif key == 13: # Enter
-                b.command("speak")
-
+            if args.gui:
+                view = cv2.flip(frame, 1)
+                h, w = view.shape[:2]
+                if hand:
+                    pts = [(int((1 - x) * w), int(y * h)) for x, y in res["hand"]]
+                    for p1, p2 in common.CONNECTIONS:
+                        cv2.line(view, pts[p1], pts[p2], (0, 255, 0), 2)
+                cv2.putText(view, f"{b.mode.upper()} {fps:.0f}fps  {res.get('text','')[-30:]}",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                cv2.imshow("ASL engine (debug)", view)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+    except KeyboardInterrupt:
+        pass
     finally:
-        cam.close()
-        esp.close()
+        esp.set(c=0, h=0, i="Engine stopped")
+        time.sleep(0.2)
+        cam.close(); esp.close(); speaker.close()
         cv2.destroyAllWindows()
-        print("[System] Clean shutdown complete.")
+        log("System", "stopped")
+
 
 if __name__ == "__main__":
     main()
