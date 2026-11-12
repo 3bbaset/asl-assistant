@@ -60,6 +60,7 @@ class State:
         self.cmds = []             # edit commands waiting to go to the AI with the next frame
         self.seq = 0               # sequence number of the last message sent to the AI
         self.text_gate = 0         # ignore text from results older than the last local edit
+        self.vocab_mode = "30"
 
     def cam_ok(self):
         return time.time() - self.frame_ts < 1.5
@@ -158,7 +159,10 @@ class Esp:
                 hint = "Camera is not sending frames"
             else:
                 hint = st.hint
-            return {"m": st.mode, "t": clean(st.text)[-60:], "h": int(bool(st.hand and ai and cam)),
+            disp_mode = st.mode
+            if disp_mode == "words" and st.vocab_mode:
+                disp_mode = f"words [{st.vocab_mode}]"
+            return {"m": disp_mode, "t": clean(st.text)[-60:], "h": int(bool(st.hand and ai and cam)),
                     "c": int(cam), "a": int(ai), "g": clean(st.guess)[:6], "i": clean(hint)[:39]}
 
     def queue_cmd(self, c):
@@ -290,7 +294,12 @@ def serve_ai(st, speech, conn):
                 if res.get("seq", 0) >= st.text_gate:
                     st.text = res.get("text", "")
                 if res.get("mode"):
-                    st.mode = res["mode"]
+                    m_str = res["mode"]
+                    if "[" in m_str:
+                        st.mode = m_str.split()[0]
+                        st.vocab_mode = m_str.split("[")[1].split("]")[0]
+                    else:
+                        st.mode = m_str
             if res.get("speak"):
                 speech.say(res["speak"])
             waiting = False
