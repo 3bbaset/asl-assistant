@@ -193,7 +193,7 @@ def calibrate():
     out("CAL:OK")
 
 # ------------------------------------------------------------------ Links
-uart = UART(2, baudrate=115200, tx=Pin(27), rx=Pin(22), timeout=0)
+uart = UART(2, baudrate=115200, tx=Pin(27), rx=Pin(22), timeout=0, rxbuf=2048)
 poll = select.poll()
 poll.register(sys.stdin.buffer, select.POLLIN)
 
@@ -208,7 +208,7 @@ def out(msg):
 MODES = (("ALPHA", "alphabets"), ("SPELL", "spelling"), ("WORDS", "words"), ("SENT", "sentences"))
 BUTTONS = (("SPACE", "CMD:SPACE", 0x2A69), ("DEL", "CMD:DEL", 0x52AA),
            ("CLEAR", "CMD:CLEAR", DKRED), ("SPEAK", "CMD:SPEAK", 0x0451))
-st = {"m": "", "t": None, "h": None, "c": None, "g": None, "i": None, "link": None}
+st = {"m": "", "t": None, "h": None, "c": None, "a": None, "g": None, "i": None, "link": None}
 last_rx = 0
 
 def draw_tabs(active):
@@ -218,19 +218,25 @@ def draw_tabs(active):
 
 def draw_cam():
     if not st["link"]:
-        text(2, 40, 104, 54, "LAPTOP\nOFFLINE", DARK, YELLOW)
+        text(2, 40, 104, 54, "PI\nOFFLINE", DARK, YELLOW)
     elif st["c"]:
         text(2, 40, 104, 54, "CAMERA\nOK", DARK, GREEN)
     else:
         text(2, 40, 104, 54, "CAMERA\nNO SIGNAL", WHITE, RED)
 
 def draw_hand():
-    if st["link"] and st["c"] and st["h"]:
+    if not st["link"]:
+        text(108, 40, 104, 54, "-", GREY, PANEL, 2)
+        set_led(1, 1, 0)                       # yellow: Pi not talking
+    elif not st["a"]:
+        text(108, 40, 104, 54, "AI OFFLINE\nstart laptop", DARK, YELLOW)
+        set_led(1, 0, 0)                       # red: laptop AI engine missing
+    elif st["c"] and st["h"]:
         text(108, 40, 104, 54, "HAND\nDETECTED", DARK, GREEN)
-        set_led(0, 1, 0)
+        set_led(0, 1, 0)                       # green: hand tracked
     else:
         text(108, 40, 104, 54, "NO HAND\nshow hand", WHITE, PANEL)
-        set_led(0, 0, 1) if st["link"] else set_led(1, 1, 0)
+        set_led(0, 0, 1)                       # blue: ready
 
 def draw_guess():
     g = (st["g"] or "")[:6]
@@ -288,7 +294,7 @@ def handle_line(line):
             new[k] = v
     if "m" in new and new["m"] != st["m"]:
         st["m"] = new["m"]; draw_tabs(st["m"])
-    for k, fn in (("c", None), ("h", None)):
+    for k in ("c", "h", "a"):
         if k in new:
             v = new[k] == "1"
             if v != st[k]:
