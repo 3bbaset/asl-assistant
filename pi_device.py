@@ -160,8 +160,8 @@ class Esp:
             else:
                 hint = st.hint
             disp_mode = st.mode
-            if disp_mode == "words" and st.vocab_mode:
-                disp_mode = f"words [{st.vocab_mode}]"
+            if disp_mode == "words" and st.vocab_mode == "2000":
+                disp_mode = "words_2000"
             return {"m": disp_mode, "t": clean(st.text)[-60:], "h": int(bool(st.hand and ai and cam)),
                     "c": int(cam), "a": int(ai), "g": clean(st.guess)[:6], "i": clean(hint)[:39]}
 
