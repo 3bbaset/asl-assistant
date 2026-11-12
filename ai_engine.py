@@ -93,16 +93,19 @@ def current_text(b):
     return b.sentence_text if b.mode == "sentences" else b.text
 
 
+def _combined_mode(b):
+    if b.mode == "words":
+        return "words_2000" if b.word_vocab_mode == "2000" else "words"
+    if b.mode == "sentences":
+        return "sentences_2000" if b.word_vocab_mode == "2000" else "sentences"
+    return b.mode
+
+
 def handle(b, hdr, jpg, last, gui):
     req = hdr.get("mode", "")
-    current_combined = "words_2000" if (b.mode == "words" and b.word_vocab_mode == "2000") else b.mode
+    current_combined = _combined_mode(b)
     if req and req != current_combined:
-        if req == "words_2000":
-            b.set_mode("words_2000")
-        elif req == "words":
-            b.set_mode("words_30")
-        else:
-            b.set_mode(req)
+        b.set_mode("words_30" if req == "words" else req)
         log("Device", f"mode -> {b.mode} (vocab={b.word_vocab_mode})")
     for c in hdr.get("cmds", []):
         if c.startswith("mode:"):
@@ -139,7 +142,7 @@ def handle(b, hdr, jpg, last, gui):
     if text != last.get("text"):
         log("AI", f"[{b.mode}] {text[-60:]!r}")
     last["text"] = text
-    disp_mode = f"words_2000" if (b.mode == "words" and b.word_vocab_mode == "2000") else b.mode
+    disp_mode = _combined_mode(b)
     return {"seq": hdr.get("seq", 0), "req_mode": req, "mode": disp_mode, "text": text,
             "hand": last["hand"], "guess": last["guess"], "hint": last["hint"], "speak": speak}
 

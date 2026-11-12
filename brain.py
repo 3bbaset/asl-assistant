@@ -98,7 +98,7 @@ class Brain:
 
     # ---------------- commands from the device ----------------
     def set_mode(self, mode):
-        # Allow passing "words_30" or "words_2000" explicitly
+        # Allow passing "words_30", "words_2000", "sentences", "sentences_2000"
         if mode in ("words_30", "words [30]"):
             self.word_model = self.word_model_30
             self.word_vocab_mode = "30"
@@ -110,13 +110,26 @@ class Brain:
                 self.word_vocab_mode = "2000"
                 self.cfg.WORD_THRESH = 0.20
             mode = "words"
+        elif mode in ("sentences", "sentences_30"):
+            self.word_model = self.word_model_30
+            self.word_vocab_mode = "30"
+            self.cfg.WORD_THRESH = 0.35
+            mode = "sentences"
+        elif mode in ("sentences_2000", "sentences_full"):
+            if self.word_model_full is not None:
+                self.word_model = self.word_model_full
+                self.word_vocab_mode = "2000"
+                self.cfg.WORD_THRESH = 0.20
+            mode = "sentences"
         valid = ["alphabets", "spelling"] + (["words", "sentences"] if self.word_model is not None else [])
         if mode in valid:
             self.mode = mode
             self.mbuf.clear()
             self.history.clear()
             self.word_seg = WordSegmenter()
-            if mode == "sentences":
+            if mode == "words":
+                self.text = ""
+            elif mode == "sentences":
                 self.sentence_words.clear()
                 self.sentence_text = ""
                 self.sentence_spoken = True
@@ -252,8 +265,9 @@ class Brain:
             self.word_top3 = "   ".join(f"{w} {p:.0%}" for w, p in w_ranked[:3])
             self.motion_info = (now, self.word_top3)
             if w_pred != "IDLE" and w_prob >= self.cfg.WORD_THRESH:
-                prefix = " " if (self.text and not self.text.endswith(" ")) else ""
-                self._type(prefix + w_pred + " ", "word", now)
+                self.text = w_pred
+                self.last_typed = (now, w_pred, "word")
+                self._typed.append(w_pred)
         top2 = (f"SIGNING... {now - self.word_seg.start:.1f}s"
                 if self.word_seg.active else (self.word_top3 or "Sign a word"))
         return pts, top2

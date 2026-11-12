@@ -214,7 +214,14 @@ last_rx = 0
 
 def draw_tabs(active):
     for i, (label, key) in enumerate(MODES):
-        on = (key == active)
+        if key == "words":
+            on = active in ("words", "sentences")
+        elif key == "words_2000":
+            on = active in ("words_2000", "sentences_2000")
+        elif key == "sentences":
+            on = active in ("sentences", "sentences_2000")
+        else:
+            on = (key == active)
         text(i * TAB_W + 1, 2, TAB_W - 2, 34, label, DARK if on else WHITE, TAB_ON if on else TAB, 1)
 
 def draw_cam():
@@ -310,7 +317,23 @@ def handle_line(line):
 def on_tap(x, y):
     if y < 38:
         i = min(4, x // TAB_W)
-        target = MODES[i][1]
+        key = MODES[i][1]
+        cur = st["m"]
+        if key == "words":
+            target = "sentences" if cur in ("sentences", "sentences_2000") else "words"
+        elif key == "words_2000":
+            target = "sentences_2000" if cur in ("sentences", "sentences_2000") else "words_2000"
+        elif key == "sentences":
+            if cur == "sentences":
+                target = "words"
+            elif cur == "sentences_2000":
+                target = "words_2000"
+            elif cur == "words_2000":
+                target = "sentences_2000"
+            else:
+                target = "sentences"
+        else:
+            target = key
         st["m"] = target
         draw_tabs(target)
         out("CMD:MODE:" + target)
