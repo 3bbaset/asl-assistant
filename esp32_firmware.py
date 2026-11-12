@@ -212,8 +212,9 @@ st = {"m": "", "t": None, "h": None, "c": None, "a": None, "g": None, "i": None,
 last_rx = 0
 
 def draw_tabs(active):
+    base_active = active.split()[0].lower() if active else ""
     for i, (label, key) in enumerate(MODES):
-        on = (key == active) or (key == "words" and active.startswith("words"))
+        on = (key == base_active)
         lbl = label
         if key == "words":
             lbl = "W:2000" if "2000" in active else "WORDS"
@@ -313,11 +314,12 @@ def on_tap(x, y):
     if y < 38:
         i = min(3, x // 80)
         target = MODES[i][1]
-        # If tapping the already-active WORDS tab, toggle between 30 and 2000 vocabulary
-        if st["m"] == target and target == "words":
+        base_current = st["m"].split()[0].lower() if st["m"] else ""
+        if base_current == "words" and target == "words":
             out("CMD:TOGGLE_VOCAB")
         else:
-            st["m"] = target; draw_tabs(st["m"])
+            st["m"] = target
+            draw_tabs(target)
             out("CMD:MODE:" + target)
     elif y >= 196:
         i = min(3, x // 80)
