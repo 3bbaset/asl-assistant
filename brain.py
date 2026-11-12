@@ -186,6 +186,7 @@ class Brain:
         now = time.time() if now is None else now
         t_start = time.time()
         self._typed = []
+        self._hands = []
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         if self.mode == "sentences" and self.word_model is not None:
             hand_pts, top2 = self._sentence_step(rgb, now)
@@ -222,12 +223,14 @@ class Brain:
             "typed": "".join(self._typed),    # NEW characters since the last frame (speak these)
             "say": say,                       # whole text, only when the device sent "speak"
             "hand": hand_pts,                 # 21 (x, y) in the UNFLIPPED picture, or []
+            "hands": self._hands,             # all detected hands (up to 2) in word/sentence mode
             "ms": round((time.time() - t_start) * 1000, 1),
         }
 
     def _sentence_step(self, rgb_unflipped, now):
         res = self.motion_detect(rgb_unflipped, int(now * 1000))
-        pts = [[round(p.x, 4), round(p.y, 4)] for p in res.hand_landmarks[0]] if res.hand_landmarks else []
+        self._hands = [[[round(p.x, 4), round(p.y, 4)] for p in h] for h in res.hand_landmarks] if res.hand_landmarks else []
+        pts = self._hands[0] if self._hands else []
         clip = self.word_seg.update(res, now)
         if clip is not None:
             w_pred, w_prob, w_ranked = classify_word(self.word_model, clip)
@@ -258,7 +261,8 @@ class Brain:
 
     def _word_step(self, rgb_unflipped, now):
         res = self.motion_detect(rgb_unflipped, int(now * 1000))
-        pts = [[round(p.x, 4), round(p.y, 4)] for p in res.hand_landmarks[0]] if res.hand_landmarks else []
+        self._hands = [[[round(p.x, 4), round(p.y, 4)] for p in h] for h in res.hand_landmarks] if res.hand_landmarks else []
+        pts = self._hands[0] if self._hands else []
         clip = self.word_seg.update(res, now)
         if clip is not None:
             w_pred, w_prob, w_ranked = classify_word(self.word_model, clip)

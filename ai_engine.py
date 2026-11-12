@@ -130,8 +130,8 @@ def handle(b, hdr, jpg, last, gui):
             if gui:
                 view = cv2.flip(frame, 1)
                 h, w = view.shape[:2]
-                if res.get("hand"):
-                    pts = [(int((1 - x) * w), int(y * h)) for x, y in res["hand"]]
+                for hand in (res.get("hands") or ([res["hand"]] if res.get("hand") else [])):
+                    pts = [(int((1 - x) * w), int(y * h)) for x, y in hand]
                     for p1, p2 in common.CONNECTIONS:
                         cv2.line(view, pts[p1], pts[p2], (0, 255, 0), 2)
                 cv2.putText(view, f"{b.mode.upper()}  {current_text(b)[-30:]}", (10, 30),
