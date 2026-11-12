@@ -95,7 +95,8 @@ def current_text(b):
 
 def handle(b, hdr, jpg, last, gui):
     req = hdr.get("mode", "")
-    if req and req != b.mode:
+    current_combined = "words_2000" if (b.mode == "words" and b.word_vocab_mode == "2000") else b.mode
+    if req and req != current_combined:
         if req == "words_2000":
             b.set_mode("words_2000")
         elif req == "words":
