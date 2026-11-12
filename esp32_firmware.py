@@ -205,20 +205,17 @@ def out(msg):
         pass
 
 # ------------------------------------------------------------------ UI state
-MODES = (("ALPHA", "alphabets"), ("SPELL", "spelling"), ("WORDS", "words"), ("SENT", "sentences"))
+MODES = (("ALPHA", "alphabets"), ("SPELL", "spelling"), ("W:30", "words"), ("W:2K", "words_2000"), ("SENT", "sentences"))
+TAB_W = 64
 BUTTONS = (("SPACE", "CMD:SPACE", 0x2A69), ("DEL", "CMD:DEL", 0x52AA),
            ("CLEAR", "CMD:CLEAR", DKRED), ("SPEAK", "CMD:SPEAK", 0x0451))
 st = {"m": "", "t": None, "h": None, "c": None, "a": None, "g": None, "i": None, "link": None}
 last_rx = 0
 
 def draw_tabs(active):
-    base_active = active.split()[0].lower() if active else ""
     for i, (label, key) in enumerate(MODES):
-        on = (key == base_active)
-        lbl = label
-        if key == "words":
-            lbl = "W:2000" if "2000" in active else "WORDS"
-        text(i * 80 + 2, 2, 76, 34, lbl, DARK if on else WHITE, TAB_ON if on else TAB, 1)
+        on = (key == active)
+        text(i * TAB_W + 1, 2, TAB_W - 2, 34, label, DARK if on else WHITE, TAB_ON if on else TAB, 1)
 
 def draw_cam():
     if not st["link"]:
@@ -312,15 +309,11 @@ def handle_line(line):
 
 def on_tap(x, y):
     if y < 38:
-        i = min(3, x // 80)
+        i = min(4, x // TAB_W)
         target = MODES[i][1]
-        base_current = st["m"].split()[0].lower() if st["m"] else ""
-        if base_current == "words" and target == "words":
-            out("CMD:TOGGLE_VOCAB")
-        else:
-            st["m"] = target
-            draw_tabs(target)
-            out("CMD:MODE:" + target)
+        st["m"] = target
+        draw_tabs(target)
+        out("CMD:MODE:" + target)
     elif y >= 196:
         i = min(3, x // 80)
         draw_buttons(i)
