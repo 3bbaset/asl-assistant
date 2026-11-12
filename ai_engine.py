@@ -105,8 +105,13 @@ def handle(b, hdr, jpg, last, gui):
             b.set_mode(req)
         log("Device", f"mode -> {b.mode} (vocab={b.word_vocab_mode})")
     for c in hdr.get("cmds", []):
-        b.command(c)
-        log("Device", c)
+        if c.startswith("mode:"):
+            m = c[5:]
+            b.set_mode("words_30" if m == "words" else m)
+            log("Device", f"mode -> {b.mode} (vocab={b.word_vocab_mode})")
+        else:
+            b.command(c)
+            log("Device", c)
     speak = ""
     if jpg:
         frame = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)

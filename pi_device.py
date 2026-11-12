@@ -60,6 +60,7 @@ class State:
         self.cmds = []             # edit commands waiting to go to the AI with the next frame
         self.seq = 0               # sequence number of the last message sent to the AI
         self.text_gate = 0         # ignore text from results older than the last local edit
+        self.mode_gate = 0         # ignore mode from results older than the last local mode tap
         self.vocab_mode = "30"
 
     def cam_ok(self):
@@ -175,9 +176,12 @@ class Esp:
             cmd = line[4:]
             log("Touch", cmd)
             if cmd.startswith("MODE:"):
+                m = cmd[5:].strip()
                 with st.lock:
-                    st.mode = cmd[5:].strip()
+                    st.mode = m
                     st.hint = ""
+                    st.mode_gate = st.seq + 1
+                    st.cmds.append("mode:" + m)
             elif cmd == "SPACE":
                 self.queue_cmd("space")
             elif cmd == "DEL":
@@ -290,7 +294,7 @@ def serve_ai(st, speech, conn):
                 st.guess, st.hint = res.get("guess", ""), res.get("hint", "")
                 if res.get("seq", 0) >= st.text_gate:
                     st.text = res.get("text", "")
-                if res.get("mode"):
+                if res.get("seq", 0) >= st.mode_gate and res.get("mode"):
                     st.mode = res["mode"]
             if res.get("speak"):
                 speech.say(res["speak"])
