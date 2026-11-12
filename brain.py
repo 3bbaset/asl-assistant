@@ -126,7 +126,7 @@ class Brain:
             self.mode = mode
             self.mbuf.clear()
             self.history.clear()
-            self.word_seg = WordSegmenter()
+            self.word_seg = WordSegmenter(max_sign=3.0 if mode == "sentences" else 4.0)
             if mode == "words":
                 self.text = ""
             elif mode == "sentences":

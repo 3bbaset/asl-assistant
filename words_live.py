@@ -36,7 +36,8 @@ class WordSegmenter:
     """Feed it one MediaPipe result per frame. A word = from "hands appear" to "hands gone",
     trimmed the same way as the training videos (extract_words.py).
     update() returns the finished clip (3900 numbers) once, otherwise None."""
-    def __init__(self):
+    def __init__(self, max_sign=MAX_SIGN):
+        self.max_sign = max_sign
         self.seq, self.start, self.last_hand = [], None, 0.0
 
     @property
@@ -52,7 +53,7 @@ class WordSegmenter:
         if self.start is None:
             return None
         self.seq.append(frame_features(res))
-        if not ((not hand and now - self.last_hand >= GONE_AFTER) or now - self.start >= MAX_SIGN):
+        if not ((not hand and now - self.last_hand >= GONE_AFTER) or now - self.start >= self.max_sign):
             return None
         long_enough = self.last_hand - self.start >= MIN_SIGN
         arr, self.seq, self.start = np.array(self.seq), [], None
