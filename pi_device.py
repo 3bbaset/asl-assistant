@@ -159,10 +159,7 @@ class Esp:
                 hint = "Camera is not sending frames"
             else:
                 hint = st.hint
-            disp_mode = st.mode
-            if disp_mode == "words" and st.vocab_mode == "2000":
-                disp_mode = "words_2000"
-            return {"m": disp_mode, "t": clean(st.text)[-60:], "h": int(bool(st.hand and ai and cam)),
+            return {"m": st.mode, "t": clean(st.text)[-60:], "h": int(bool(st.hand and ai and cam)),
                     "c": int(cam), "a": int(ai), "g": clean(st.guess)[:6], "i": clean(hint)[:39]}
 
     def queue_cmd(self, c):
@@ -294,12 +291,7 @@ def serve_ai(st, speech, conn):
                 if res.get("seq", 0) >= st.text_gate:
                     st.text = res.get("text", "")
                 if res.get("mode"):
-                    m_str = res["mode"]
-                    if "[" in m_str:
-                        st.mode = m_str.split()[0]
-                        st.vocab_mode = m_str.split("[")[1].split("]")[0]
-                    else:
-                        st.mode = m_str
+                    st.mode = res["mode"]
             if res.get("speak"):
                 speech.say(res["speak"])
             waiting = False

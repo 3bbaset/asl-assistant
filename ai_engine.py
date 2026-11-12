@@ -95,11 +95,14 @@ def current_text(b):
 
 def handle(b, hdr, jpg, last, gui):
     req = hdr.get("mode", "")
-    # Normalize mode string (e.g. "words [30]" -> "words")
-    base_req = req.split()[0].lower() if req else ""
-    if base_req and base_req != b.mode:
-        b.set_mode(base_req)
-        log("Device", f"mode -> {b.mode}" + ("" if b.mode == base_req else f" ({req} unavailable)"))
+    if req and req != b.mode:
+        if req == "words_2000":
+            b.set_mode("words_2000")
+        elif req == "words":
+            b.set_mode("words_30")
+        else:
+            b.set_mode(req)
+        log("Device", f"mode -> {b.mode} (vocab={b.word_vocab_mode})")
     for c in hdr.get("cmds", []):
         b.command(c)
         log("Device", c)
