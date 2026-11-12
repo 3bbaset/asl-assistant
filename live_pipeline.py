@@ -35,11 +35,13 @@ def log(tag, msg):
 
 # ---------------------------------------------------------------- speech
 class Speaker:
-    """One persistent PowerShell speech process, fed through stdin (no per-word startup lag)."""
-    def __init__(self):
-        self.p = None
+    """Speaks directly on the Raspberry Pi's audio hardware using espeak-ng,
+    with local fallback to Windows TTS if the Pi connection is offline."""
+    def __init__(self, pi_cam=None):
+        self.pi_cam = pi_cam
+        self.local_p = None
         try:
-            self.p = subprocess.Popen(
+            self.local_p = subprocess.Popen(
                 ["powershell", "-NoProfile", "-Command",
                  "Add-Type -AssemblyName System.Speech;"
                  "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
@@ -47,19 +49,32 @@ class Speaker:
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 text=True, creationflags=0x08000000 if os.name == "nt" else 0)
         except Exception as e:
-            log("TTS", f"unavailable: {e}")
+            log("TTS", f"local fallback unavailable: {e}")
 
     def say(self, s):
         s = "".join(ch for ch in s if ch.isalnum() or ch in " '").strip()
-        if s and self.p and self.p.poll() is None:
+        if not s:
+            return
+
+        spoken_on_pi = False
+        if self.pi_cam and self.pi_cam.ssh:
             try:
-                self.p.stdin.write(s + "\n"); self.p.stdin.flush()
+                # Trigger speech on Raspberry Pi audio hardware
+                self.pi_cam.ssh.exec_command(f'nohup espeak-ng -v en -s 145 "{s}" >/dev/null 2>&1 &')
+                spoken_on_pi = True
+            except Exception:
+                spoken_on_pi = False
+
+        if not spoken_on_pi and self.local_p and self.local_p.poll() is None:
+            try:
+                self.local_p.stdin.write(s + "\n")
+                self.local_p.stdin.flush()
             except Exception:
                 pass
 
     def close(self):
-        if self.p:
-            self.p.kill()
+        if self.local_p:
+            self.local_p.kill()
 
 
 # ---------------------------------------------------------------- ESP32 link
@@ -281,8 +296,8 @@ def main():
 
     esp = ESP32Link(args.esp_port)
     esp.set(m=args.mode, t="", h=0, c=0, g="", i="Starting engine...")
-    speaker = Speaker()
     cam = PiCamera()
+    speaker = Speaker(pi_cam=cam)
 
     log("AI", "loading models...")
     b = server.build_real_brain()
