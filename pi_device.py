@@ -187,6 +187,8 @@ class Esp:
                 with st.lock:
                     t = st.text
                 self.speech.say(t if t.strip() else "Nothing to say", interrupt=True)
+            elif cmd == "TOGGLE_VOCAB":
+                self.queue_cmd("toggle_vocab")
         elif line == "READY":
             log("ESP32", "screen booted")
             self.sent = {}

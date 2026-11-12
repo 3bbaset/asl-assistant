@@ -40,8 +40,10 @@ def build_real_brain():
 
     alpha_model = joblib.load("asl_model_v2.joblib")
     motion_model = joblib.load("motion_model2.joblib")
-    word_path = "word_model_curated_85.joblib" if os.path.exists("word_model_curated_85.joblib") else ("word_model_full_2021.joblib" if os.path.exists("word_model_full_2021.joblib") else "word_model.joblib")
-    word_model = joblib.load(word_path) if os.path.exists(word_path) else None
+    m30_path = "word_model_curated_30.joblib" if os.path.exists("word_model_curated_30.joblib") else "word_model_curated_85.joblib"
+    m_full_path = "word_model_full_2021.joblib"
+    word_model_30 = joblib.load(m30_path) if os.path.exists(m30_path) else None
+    word_model_full = joblib.load(m_full_path) if os.path.exists(m_full_path) else None
     alpha_det = make_detector(min_conf=0.6)            # IMAGE mode, 1 hand, as in app.py
     opts = vision.HandLandmarkerOptions(
         base_options=mp_python.BaseOptions(model_asset_path="hand_landmarker.task"),
@@ -56,7 +58,8 @@ def build_real_brain():
             mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), ts_ms)
 
     return Brain(alpha_model, motion_model,
-                 lambda rgb: detect(alpha_det, rgb), motion_detect, word_model=word_model)
+                 lambda rgb: detect(alpha_det, rgb), motion_detect,
+                 word_model=word_model_30, word_model_full=word_model_full)
 
 
 def build_stub_brain():

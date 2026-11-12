@@ -47,12 +47,15 @@ class Config:
 
 class Brain:
     def __init__(self, alpha_model, motion_model, alpha_detect, motion_detect,
-                 cfg=None, word_model=None):
+                 cfg=None, word_model=None, word_model_full=None):
         """alpha_detect(rgb_flipped) -> list of 21 landmarks or None
         motion_detect(rgb_unflipped, ts_ms) -> MediaPipe-style result (.hand_landmarks)"""
         self.cfg = cfg or Config()
         self.alpha_model, self.motion_model = alpha_model, motion_model
+        self.word_model_30 = word_model
+        self.word_model_full = word_model_full
         self.word_model = word_model
+        self.word_vocab_mode = "30"       # "30" (core 80-86% acc) or "2000" (full vocabulary)
         # The alphabet detector and the motion detector are separate MediaPipe objects, so in
         # spelling/alphabets mode they run in parallel (halves the time per frame).
         self._alpha_detect_raw, self.motion_detect = alpha_detect, motion_detect
@@ -77,6 +80,21 @@ class Brain:
         self.motion_info = (0.0, "")     # (time, "J 87%   IDLE 10%   Z 3%")
         self.last_typed = (0.0, "", "")  # (time, char, source)
         self.pending_say = False
+
+    def toggle_word_model(self):
+        """Toggle between high-accuracy 30-word model and full 2,000-word model."""
+        if self.word_model_full is None:
+            return "30"
+        if self.word_vocab_mode == "30":
+            self.word_model = self.word_model_full
+            self.word_vocab_mode = "2000"
+            self.cfg.WORD_THRESH = 0.20   # Lower threshold for 2000-class spread
+        else:
+            self.word_model = self.word_model_30
+            self.word_vocab_mode = "30"
+            self.cfg.WORD_THRESH = 0.35
+        self.word_top3 = ""
+        return self.word_vocab_mode
 
     # ---------------- commands from the device ----------------
     def set_mode(self, mode):
@@ -126,6 +144,8 @@ class Brain:
             self.set_mode("words")
         elif cmd in ("mode_sentences", "sentences", "4"):
             self.set_mode("sentences")
+        elif cmd in ("toggle_vocab", "vocab", "switch_vocab"):
+            self.toggle_word_model()
 
     def _type(self, ch, source, now):
         self.text = (self.text + ch)[-self.cfg.MAX_TEXT:]

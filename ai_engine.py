@@ -128,7 +128,8 @@ def handle(b, hdr, jpg, last, gui):
     if text != last.get("text"):
         log("AI", f"[{b.mode}] {text[-60:]!r}")
     last["text"] = text
-    return {"seq": hdr.get("seq", 0), "req_mode": req, "mode": b.mode, "text": text,
+    disp_mode = f"{b.mode} [{b.word_vocab_mode}]" if b.mode in ("words", "sentences") else b.mode
+    return {"seq": hdr.get("seq", 0), "req_mode": req, "mode": disp_mode, "text": text,
             "hand": last["hand"], "guess": last["guess"], "hint": last["hint"], "speak": speak}
 
 

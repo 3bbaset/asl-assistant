@@ -309,8 +309,13 @@ def handle_line(line):
 def on_tap(x, y):
     if y < 38:
         i = min(3, x // 80)
-        st["m"] = MODES[i][1]; draw_tabs(st["m"])  # instant feedback, host confirms
-        out("CMD:MODE:" + MODES[i][1])
+        target = MODES[i][1]
+        # If tapping the already-active WORDS tab, toggle between 30 and 2000 vocabulary
+        if st["m"] == target and target == "words":
+            out("CMD:TOGGLE_VOCAB")
+        else:
+            st["m"] = target; draw_tabs(st["m"])
+            out("CMD:MODE:" + target)
     elif y >= 196:
         i = min(3, x // 80)
         draw_buttons(i)
