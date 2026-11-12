@@ -12,6 +12,7 @@ so the numbers are computed exactly as in training.
 """
 import time
 from collections import Counter, deque
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
@@ -52,7 +53,12 @@ class Brain:
         self.cfg = cfg or Config()
         self.alpha_model, self.motion_model = alpha_model, motion_model
         self.word_model = word_model
-        self.alpha_detect, self.motion_detect = alpha_detect, motion_detect
+        # The alphabet detector and the motion detector are separate MediaPipe objects, so in
+        # spelling/alphabets mode they run in parallel (halves the time per frame).
+        self._alpha_detect_raw, self.motion_detect = alpha_detect, motion_detect
+        self.alpha_detect = self._alpha_detect_cached
+        self._alpha_future = None
+        self._pool = ThreadPoolExecutor(max_workers=1)
         self.mode = "spelling"            # "alphabets", "spelling", "words", or "sentences"
         self.word_seg = WordSegmenter()
         self.word_top3 = ""
@@ -126,6 +132,10 @@ class Brain:
         self.last_typed = (now, ch, source)
         self._typed.append(ch)
 
+    def _alpha_detect_cached(self, rgb_flipped):
+        fut, self._alpha_future = self._alpha_future, None
+        return fut.result() if fut is not None else self._alpha_detect_raw(rgb_flipped)
+
     # ---------------- one frame ----------------
     def process(self, frame_bgr, now=None):
         now = time.time() if now is None else now
@@ -141,12 +151,18 @@ class Brain:
             letter = None
             current_text = self.text
         elif self.mode == "alphabets":
+            flipped = cv2.flip(rgb, 1)
+            self._alpha_future = self._pool.submit(self._alpha_detect_raw, flipped)
             hand_pts = self._motion_step_inspect(rgb, now)
-            letter, top2 = self._alpha_step_inspect(cv2.flip(rgb, 1), now)
+            letter, top2 = self._alpha_step_inspect(flipped, now)
+            self._alpha_future = None
             current_text = self.text
         else: # "spelling"
+            flipped = cv2.flip(rgb, 1)
+            self._alpha_future = self._pool.submit(self._alpha_detect_raw, flipped)
             hand_pts = self._motion_step(rgb, now)
-            letter, top2 = self._alpha_step(cv2.flip(rgb, 1), now)
+            letter, top2 = self._alpha_step(flipped, now)
+            self._alpha_future = None
             current_text = self.text
         say = current_text if self.pending_say else ""
         self.pending_say = False
