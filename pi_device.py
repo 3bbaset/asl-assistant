@@ -289,7 +289,7 @@ def serve_ai(st, speech, conn):
                 st.guess, st.hint = res.get("guess", ""), res.get("hint", "")
                 if res.get("seq", 0) >= st.text_gate:
                     st.text = res.get("text", "")
-                if res.get("req_mode") == st.mode and res.get("mode"):
+                if res.get("mode"):
                     st.mode = res["mode"]
             if res.get("speak"):
                 speech.say(res["speak"])

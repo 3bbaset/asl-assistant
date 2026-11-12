@@ -213,8 +213,11 @@ last_rx = 0
 
 def draw_tabs(active):
     for i, (label, key) in enumerate(MODES):
-        on = key == active
-        text(i * 80 + 2, 2, 76, 34, label, DARK if on else WHITE, TAB_ON if on else TAB, 1)
+        on = (key == active) or (key == "words" and active.startswith("words"))
+        lbl = label
+        if key == "words":
+            lbl = "W:2000" if "2000" in active else "WORDS"
+        text(i * 80 + 2, 2, 76, 34, lbl, DARK if on else WHITE, TAB_ON if on else TAB, 1)
 
 def draw_cam():
     if not st["link"]:

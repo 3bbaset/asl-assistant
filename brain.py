@@ -98,6 +98,18 @@ class Brain:
 
     # ---------------- commands from the device ----------------
     def set_mode(self, mode):
+        # Allow passing "words_30" or "words_2000" explicitly
+        if mode in ("words_30", "words [30]"):
+            self.word_model = self.word_model_30
+            self.word_vocab_mode = "30"
+            self.cfg.WORD_THRESH = 0.35
+            mode = "words"
+        elif mode in ("words_2000", "words [2000]", "words_full"):
+            if self.word_model_full is not None:
+                self.word_model = self.word_model_full
+                self.word_vocab_mode = "2000"
+                self.cfg.WORD_THRESH = 0.20
+            mode = "words"
         valid = ["alphabets", "spelling"] + (["words", "sentences"] if self.word_model is not None else [])
         if mode in valid:
             self.mode = mode

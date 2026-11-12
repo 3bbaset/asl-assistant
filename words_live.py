@@ -64,7 +64,16 @@ class WordSegmenter:
 
 def classify(model, clip):
     """clip (3900 numbers) -> (word, probability, list of (word, probability) best first)."""
-    probs = model.predict_proba(np.array([fill_gaps(clip.reshape(30, 130))]))[0]
+    raw_clip = fill_gaps(clip.reshape(30, 130))
+    # Check if model has a FunctionTransformer pipeline that expects (30, 130) raw clips:
+    first_step = getattr(model, "steps", None)
+    if first_step and hasattr(first_step[0][1], "func") and first_step[0][1].func.__name__ == "words_to_features":
+        inp = np.array([raw_clip], dtype=np.float32)
+    else:
+        # Otherwise compute engineered feature vector:
+        from words_common import words_to_features
+        inp = words_to_features([raw_clip])
+    probs = model.predict_proba(inp)[0]
     order = probs.argsort()[::-1]
     ranked = [(str(model.classes_[i]), float(probs[i])) for i in order]
     return ranked[0][0], ranked[0][1], ranked
