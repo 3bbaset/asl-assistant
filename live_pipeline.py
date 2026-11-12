@@ -24,7 +24,7 @@ from serial.tools import list_ports
 import common
 import server
 
-PI_HOSTS = ["169.254.83.50", "fe80::76bf:bb6e:2582:f5e9%3", "raspberrypi.local"]
+PI_HOSTS = ["192.168.0.23", "169.254.83.50", "fe80::76bf:bb6e:2582:f5e9%3", "raspberrypi.local"]
 PI_USER, PI_PASS, PI_PORT = "pi", "raspberry", 8888
 MODES = ("alphabets", "spelling", "words", "sentences")
 
