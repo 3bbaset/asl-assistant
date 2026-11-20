@@ -31,7 +31,7 @@ A real-time **American Sign Language (ASL)** and **Arabic / Egyptian Sign Langua
 | :--- | :--- | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **`asl_alpha`** | **ASL Static Alphabet (`A–Z` sans `J/Z`)** | ASL | `HistGradientBoosting` (`FastHGB`) | 24 | 46,964 / 9,845 | **98.10%** | **99.30%** | **97.88%** | 0.061 |
 | **`asl_motion`** | **ASL Motion Letters (`J`, `Z`, `IDLE`)** | ASL | `SVC` (5-fold GroupKFold OOF) | 3 | 104 / 130 | **97.69%** | **100.00%** | **97.74%** | 0.572 |
-| **`asl_words_30`** | **ASL Core Conversational Words** | ASL | Soft-Voting Ensemble (`LR+MLP+ET`) | 32 | 812 / 204 | **88.24%** | **94.12%** *(Top-5: **95.59%**)* | **87.95%** | 0.450 |
+| **`asl_words_30`** | **ASL Core Conversational Words** | ASL | Soft-Voting Ensemble (`LR+MLP+ET`) | 32 | 3,558 / 890 | **96.97%** | **99.78%** *(Top-5: **100.00%**)* | **97.10%** | 0.258 |
 | **`asl_words_2021`** | **ASL Full WLASL Vocabulary (`W:2K`)** | ASL | `MLPClassifier` | 2,021 | 38,116 / 9,529 | **31.31%** | **47.58%** *(Top-5: **54.34%**)* | **29.64%** | 0.676 |
 | **`arsl_alpha`** | **ArSL Alphabet (`arbml/ArSL21L`)** | ArSL | `MLPClassifier` | 32 | 11,063 / 2,766 | **96.89%** | **98.81%** *(Top-5: **99.20%**)* | **96.84%** | 0.005 |
 | **`arsl_words_30`** | **ArSL Everyday Words (`KArSL-502`)** | ArSL | Ensemble (`MLP+ET+LGBM`) | 20 | 14,712 / 3,678 | **97.47%** | **99.89%** *(Top-5: **99.92%**)* | **97.50%** | 0.130 |
@@ -39,7 +39,7 @@ A real-time **American Sign Language (ASL)** and **Arabic / Egyptian Sign Langua
 ### Understanding the Evaluation Metrics
 
 * **Top-1 Accuracy ("Exact First Guess")**: How often the model's **#1 highest-probability prediction** is the exact correct sign. On the device, Top-1 drives what is **typed into the main text box**, displayed in the **top-right `GUESS` square**, and **spoken aloud** by the speaker.
-* **Top-3 Accuracy ("Right Answer in Top 3 Candidates")**: How often the true sign appears among the model's **top 3 highest-probability predictions**. On the device, this powers the **bottom `HINT` bar** on the ESP32 and the **Top-3 candidate bars** on the web dashboard—demonstrating that even for visually similar handshapes, the correct sign is almost always surfaced among the top candidates (**94.12%** on ASL 32-Words, **99.89%** on ArSL 20-Words).
+* **Top-3 Accuracy ("Right Answer in Top 3 Candidates")**: How often the true sign appears among the model's **top 3 highest-probability predictions**. On the device, this powers the **bottom `HINT` bar** on the ESP32 and the **Top-3 candidate bars** on the web dashboard—demonstrating that even for visually similar handshapes, the correct sign is almost always surfaced among the top candidates (**99.78%** on ASL 32-Words, **99.89%** on ArSL 20-Words).
 * **Macro-F1 Score ("Balanced Fairness Across All Signs")**: The unweighted mean of per-class harmonic precision/recall scores across every class:
   $$\text{F1}_c = \frac{2 \times \text{Precision}_c \times \text{Recall}_c}{\text{Precision}_c + \text{Recall}_c}, \qquad \text{Macro-F1} = \frac{1}{C}\sum_{c=1}^{C} \text{F1}_c$$
   Unlike raw accuracy, Macro-F1 weights rare and frequent classes equally. Close alignment between Top-1 Accuracy and Macro-F1 across all models proves consistent recognition across the entire vocabulary rather than overfitting to majority classes.
@@ -107,7 +107,7 @@ pip install -r requirements.txt
 | :--- | :--- |
 | **`ALPHA`** | Live letter inspection without typing (`A–Z` for ASL, 32 letters `أ–ي` for ArSL). |
 | **`SPELL`** | Fingerspelling typing engine with fast agreement hold (`0.28 s`) and `J/Z` motion replacement in ASL. |
-| **`W:30`** / **`W:2K`** | Single-word recognition (curated 32-word ASL at **88.24%** / 20-word ArSL at **97.47%** with `~0.75 s` stillness auto-commit, or 2,021-word ASL). |
+| **`W:30`** / **`W:2K`** | Single-word recognition (curated 32-word ASL at **96.97%** / 20-word ArSL at **97.47%** with `~0.75 s` stillness auto-commit, or 2,021-word ASL). |
 | **`SENT`** | Paired with `W:30` or `W:2K`; chains signs into formatted English or Arabic sentences & auto-speaks after a `1.2 s` natural pause. |
 | **`IN:ASL` / `IN:AR`** | Switches active recognition pipeline between ASL models and Arabic/Egyptian ArSL models. |
 | **`OUT:EN` / `OUT:AR`** | Translates recognized output to English or Arabic (offline curated dict + online fallback) and switches Pi speech (`en-us` / `ar`). |
