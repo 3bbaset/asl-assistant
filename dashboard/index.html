@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bilingual Sign Language Translator — Capstone Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=Inter:wght@400;500;600;700&family=Noto+Sans+Arabic:wght@500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand-group">
+        <div class="brand-mark" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 11V6a2 2 0 0 0-4 0v5" />
+            <path d="M14 10V4a2 2 0 0 0-4 0v6" />
+            <path d="M10 10.5V6a2 2 0 0 0-4 0v8" />
+            <path d="M6 14v-2a2 2 0 0 0-4 0v2c0 4.4 3.6 8 8 8h2c3.3 0 6-2.7 6-6v-5a2 2 0 0 0-4 0v2" />
+          </svg>
+        </div>
+        <div>
+          <h1 class="brand-title">Bilingual Sign Language Translator</h1>
+          <p class="brand-sub">G12 Capstone Prototype &middot; ASL &amp; ArSL Recognition + Arabic Speech</p>
+        </div>
+      </div>
+
+      <nav class="nav-tabs" aria-label="Dashboard sections">
+        <button class="tab-btn active" data-tab="live" type="button">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+          Live Console
+        </button>
+        <button class="tab-btn" data-tab="benchmarks" type="button">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          Accuracy &amp; Graphs
+        </button>
+        <button class="tab-btn" data-tab="confusion" type="button">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          Confusion Matrices
+        </button>
+        <button class="tab-btn" data-tab="export" type="button">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+          Results &amp; Vocabulary
+        </button>
+      </nav>
+
+      <div class="status-pills">
+        <span id="pill-link" class="pill"><span class="dot"></span>Checking Pi...</span>
+        <span id="pill-fps" class="pill tabular">0.0 FPS</span>
+        <span id="pill-lat" class="pill tabular">0 ms</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="shell">
+    <!-- TAB 1: LIVE PROTOTYPE CONSOLE -->
+    <section id="tab-live" class="tab-panel active">
+      <div class="console-grid">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2 class="card-title">Pi Camera Feed &amp; Dual-Hand Landmarks</h2>
+              <p class="card-sub">Live stream from <code>ai_engine.py</code> with 21-keypoint hand skeleton tracking</p>
+            </div>
+            <span id="pill-hand" class="pill">No Hand</span>
+          </div>
+          <div class="video-box">
+            <img id="live-video" src="/api/video" alt="Live ASL and ArSL camera stream with hand skeleton overlay" />
+            <div id="video-offline" class="video-offline">
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" style="margin-bottom:0.5rem;opacity:0.7;"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+              <strong>Waiting for Pi camera frames</strong>
+              <span style="font-size:0.8rem;margin-top:0.25rem;">Run <code>.\.venv\Scripts\python.exe ai_engine.py --gui</code> with the Raspberry Pi connected.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="stack-gap">
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Bilingual Output</h2>
+                <p class="card-sub">Real-time recognition &amp; translation synced across ESP32, Pi Speaker, and Laptop</p>
+              </div>
+            </div>
+            <div class="bilingual-box">
+              <div class="output-pane">
+                <div class="output-lang-tag" id="src-lang-tag">RECOGNIZED OUTPUT</div>
+                <div id="live-text" class="output-text">Start signing...</div>
+              </div>
+              <div class="output-pane ar-pane">
+                <div class="output-lang-tag">ARABIC TRANSLATION / النص العربي</div>
+                <div id="live-ar" class="output-text ar rtl-ar">ابدأ بلغة الإشارة...</div>
+              </div>
+            </div>
+
+            <div class="ctrl-section">
+              <span class="ctrl-label">Sign Language Input Model</span>
+              <div class="btn-row">
+                <button class="ctrl-btn active" data-cmd="sign:asl" data-sign="asl" type="button">ASL (American)</button>
+                <button class="ctrl-btn" data-cmd="sign:arsl" data-sign="arsl" type="button">ArSL (Arabic / Egyptian)</button>
+              </div>
+            </div>
+
+            <div class="ctrl-section">
+              <span class="ctrl-label">Output &amp; Speech Language</span>
+              <div class="btn-row">
+                <button class="ctrl-btn active" data-cmd="lang:en" data-lang="en" type="button">English (EN)</button>
+                <button class="ctrl-btn" data-cmd="lang:ar" data-lang="ar" type="button">Arabic / العربية (AR)</button>
+              </div>
+            </div>
+
+            <div class="ctrl-section">
+              <span class="ctrl-label">Recognition Mode</span>
+              <div class="btn-row">
+                <button class="ctrl-btn" data-cmd="mode:alphabets" data-mode="alphabets" type="button">ALPHA</button>
+                <button class="ctrl-btn active" data-cmd="mode:spelling" data-mode="spelling" type="button">SPELL</button>
+                <button class="ctrl-btn" data-cmd="mode:words" data-mode="words" type="button">W:30</button>
+                <button class="ctrl-btn" data-cmd="mode:words_2000" data-mode="words_2000" type="button">W:2K</button>
+                <button class="ctrl-btn" data-cmd="mode:sentences" data-mode="sentences" type="button">W:30+SENT</button>
+                <button class="ctrl-btn" data-cmd="mode:sentences_2000" data-mode="sentences_2000" type="button">W:2K+SENT</button>
+              </div>
+            </div>
+
+            <div class="ctrl-section" style="margin-bottom:0;">
+              <span class="ctrl-label">Device Actions</span>
+              <div class="btn-row">
+                <button class="ctrl-btn" data-cmd="space" type="button">Space</button>
+                <button class="ctrl-btn" data-cmd="backspace" type="button">Delete</button>
+                <button class="ctrl-btn danger" data-cmd="clear" type="button">Clear</button>
+                <button class="btn btn-primary" data-cmd="speak" type="button">Speak Now</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <h2 class="card-title">Top-3 Confidence &amp; Live Log</h2>
+              <span id="live-guess-badge" class="pill tabular">-</span>
+            </div>
+            <div id="prob-bars" class="prob-list" style="margin-bottom:0.85rem;">
+              <div class="card-sub">Top-3 class probabilities appear while signing.</div>
+            </div>
+            <div id="live-logs" class="log-box">Waiting for events...</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: MODEL BENCHMARKS & GRAPHS -->
+    <section id="tab-benchmarks" class="tab-panel">
+      <div class="kpi-strip">
+        <div class="kpi-card">
+          <div class="kpi-label">ASL Static Alphabet (24 Letters)</div>
+          <div id="kpi-asl-alpha" class="kpi-value tabular">--%</div>
+          <div id="kpi-asl-alpha-sub" class="kpi-delta">Top-1 held-out test accuracy</div>
+        </div>
+        <div class="kpi-card arsl">
+          <div class="kpi-label">ArSL Alphabet (32 Arabic Letters)</div>
+          <div id="kpi-arsl-alpha" class="kpi-value tabular">--%</div>
+          <div id="kpi-arsl-alpha-sub" class="kpi-delta">arbml/ArSL21L held-out split</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">ASL Words vs. ArSL Everyday Words</div>
+          <div id="kpi-words-pair" class="kpi-value tabular">--% / --%</div>
+          <div id="kpi-words-sub" class="kpi-delta">Top-1 comparison (ASL 32 vs ArSL 20 words)</div>
+        </div>
+        <div class="kpi-card arsl">
+          <div class="kpi-label">Pipeline Throughput &amp; Latency</div>
+          <div id="kpi-latency" class="kpi-value tabular">-- ms</div>
+          <div id="kpi-latency-sub" class="kpi-delta">Avg per-sample classifier inference</div>
+        </div>
+      </div>
+
+      <div class="charts-grid">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2 class="card-title">All 6 Models: Accuracy &amp; Macro-F1</h2>
+              <p class="card-sub">Top-1, Top-3, and Macro-F1 (%) across ASL and ArSL benchmarks</p>
+            </div>
+            <button class="btn" data-export-chart="chart-overview" type="button">Export PNG</button>
+          </div>
+          <div class="chart-wrap" role="img" aria-label="Bar chart comparing Top-1 accuracy, Top-3 accuracy, and Macro-F1 across all six models">
+            <canvas id="chart-overview"></canvas>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2 class="card-title">Vocabulary Size Scaling (WLASL 23 &rarr; 2,021 Words)</h2>
+              <p class="card-sub">Empirical Top-1 vs Top-3 accuracy across 22 progressive dataset checkpoints</p>
+            </div>
+            <button class="btn" data-export-chart="chart-scaling" type="button">Export PNG</button>
+          </div>
+          <div class="chart-wrap" role="img" aria-label="Line chart of Top-1 and Top-3 accuracy as ASL vocabulary grows from 23 to 2021 words">
+            <canvas id="chart-scaling"></canvas>
+          </div>
+        </div>
+
+        <div class="card chart-span-2">
+          <div class="card-head">
+            <div>
+              <h2 class="card-title">Algorithm Benchmark Comparison (ASL Alphabet, ArSL Letters, ArSL Words)</h2>
+              <p class="card-sub">Controlled comparisons on identical train/test splits inside each dataset</p>
+            </div>
+            <button class="btn" data-export-chart="chart-arch" type="button">Export PNG</button>
+          </div>
+          <div class="chart-wrap tall" role="img" aria-label="Grouped comparison of candidate classifier architectures across ASL and ArSL tasks">
+            <canvas id="chart-arch"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2 class="card-title">Unified Capstone Benchmark Summary Table</h2>
+            <p class="card-sub">Direct values loaded from <code>reports/capstone_metrics.json</code></p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>Track</th>
+                <th>Algorithm</th>
+                <th class="tabular">Classes</th>
+                <th class="tabular">Train / Test</th>
+                <th class="tabular">Top-1 Acc</th>
+                <th class="tabular">Top-3 Acc</th>
+                <th class="tabular">Macro-F1</th>
+                <th class="tabular">Infer (ms)</th>
+              </tr>
+            </thead>
+            <tbody id="summary-table-body">
+              <tr><td colspan="9">Loading metrics...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: CONFUSION MATRICES & PER-CLASS ANALYSIS -->
+    <section id="tab-confusion" class="tab-panel">
+      <div class="card" style="margin-bottom:1.125rem;">
+        <div class="card-head">
+          <div>
+            <h2 class="card-title">Confusion Matrix &amp; Error Diagnostics</h2>
+            <p class="card-sub">Hover any cell to inspect exact true &rarr; predicted counts; single-hue scale prevents visual distortion</p>
+          </div>
+          <div class="btn-row">
+            <label for="cm-model-select" class="sr-only" style="position:absolute;left:-9999px;">Select Model</label>
+            <select id="cm-model-select" class="select-input"></select>
+            <button class="btn" id="btn-export-cm" type="button">Export Heatmap PNG</button>
+          </div>
+        </div>
+
+        <div class="cm-layout">
+          <div class="cm-canvas-wrap">
+            <canvas id="cm-canvas" width="660" height="660" aria-label="Interactive confusion matrix heatmap"></canvas>
+          </div>
+
+          <div class="stack-gap">
+            <div class="card" style="padding:0.9rem;">
+              <h3 class="card-title" style="margin-bottom:0.5rem;">Top Misclassified Sign Pairs</h3>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>True Sign</th>
+                      <th>Predicted As</th>
+                      <th class="tabular">Errors</th>
+                    </tr>
+                  </thead>
+                  <tbody id="confused-pairs-body"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="card" style="padding:0.9rem;">
+              <div class="card-head" style="margin-bottom:0.5rem;">
+                <h3 class="card-title">Per-Class Precision, Recall &amp; F1</h3>
+                <input id="class-filter" class="text-input" type="search" placeholder="Filter class..." aria-label="Filter per-class metrics" style="width:140px;" />
+              </div>
+              <div class="table-wrap" style="max-height:360px;overflow-y:auto;">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Class</th>
+                      <th class="tabular">Prec</th>
+                      <th class="tabular">Recall</th>
+                      <th class="tabular">F1</th>
+                      <th class="tabular">N</th>
+                    </tr>
+                  </thead>
+                  <tbody id="per-class-body"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: RESULTS EXPORT & BILINGUAL VOCABULARY -->
+    <section id="tab-export" class="tab-panel">
+      <div class="charts-grid" style="margin-bottom:1.125rem;">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2 class="card-title">Capstone Report Table (Markdown)</h2>
+              <p class="card-sub">Copy directly into <code>README.md</code> or your final Capstone documentation</p>
+            </div>
+            <button class="btn btn-primary" id="btn-copy-md" type="button">Copy Markdown</button>
+          </div>
+          <pre id="export-md" class="export-code">Loading...</pre>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2 class="card-title">Capstone Report Table (LaTeX)</h2>
+              <p class="card-sub">Ready for Overleaf / IEEE Capstone thesis formatting</p>
+            </div>
+            <div class="btn-row">
+              <button class="btn" id="btn-download-json" type="button">Download JSON</button>
+              <button class="btn btn-primary" id="btn-copy-tex" type="button">Copy LaTeX</button>
+            </div>
+          </div>
+          <pre id="export-tex" class="export-code">Loading...</pre>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2 class="card-title">Supported Bilingual Vocabulary Reference</h2>
+            <p class="card-sub">All ASL curated words (+ Arabic translations), ArSL 30 words, and 32 Arabic alphabet signs</p>
+          </div>
+          <div class="btn-row">
+            <select id="vocab-track" class="select-input" aria-label="Select vocabulary set">
+              <option value="arsl_words">ArSL Everyday Words (20)</option>
+              <option value="arsl_letters">ArSL Arabic Letters (32)</option>
+              <option value="asl_words">ASL Curated Words + Arabic Translation</option>
+            </select>
+            <input id="vocab-search" class="text-input" type="search" placeholder="Search English or Arabic..." aria-label="Search vocabulary" />
+          </div>
+        </div>
+        <div class="table-wrap" style="max-height:420px;overflow-y:auto;">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Key / ID</th>
+                <th>English Label</th>
+                <th>Arabic Label (العربية)</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody id="vocab-body">
+              <tr><td colspan="4">Loading vocabulary...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="cm-tooltip" class="cm-tooltip" role="status"></div>
+</body>
+</html>

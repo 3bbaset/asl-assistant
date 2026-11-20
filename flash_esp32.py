@@ -7,7 +7,7 @@ The firmware disables Ctrl-C, so plain `mpremote` cannot interrupt it.
 2. If that fails (old firmware), wipe the filesystem header with esptool,
    which makes MicroPython boot to a bare REPL, then copy.
 """
-import subprocess, sys, time
+import os, subprocess, sys, time
 import serial
 
 PORT = sys.argv[1] if len(sys.argv) > 1 else "COM15"
@@ -26,7 +26,12 @@ def ask_repl():
 
 def copy():
     r = mpremote("cp", "esp32_firmware.py", ":main.py")
-    return r.returncode == 0, r.stdout + r.stderr
+    if r.returncode != 0:
+        return False, r.stdout + r.stderr
+    if os.path.exists("ar_font.bin"):
+        r2 = mpremote("cp", "ar_font.bin", ":ar_font.bin")
+        return r2.returncode == 0, r.stdout + r2.stdout + r2.stderr
+    return True, r.stdout + r.stderr
 
 print(f"[flash] Asking firmware on {PORT} to release the REPL...")
 ask_repl()

@@ -61,6 +61,11 @@ class State:
         self.seq = 0               # sequence number of the last message sent to the AI
         self.text_gate = 0         # ignore text from results older than the last local edit
         self.mode_gate = 0         # ignore mode from results older than the last local mode tap
+        self.lang_gate = 0         # ignore sign/out lang older than the last local lang tap
+        self.sign_lang = "asl"     # "asl" or "arsl"
+        self.out_lang = "en"       # "en" or "ar"
+        self.ar_hex = ""           # pre-shaped 16x16 glyph indices for ESP32
+        self.speak_text = ""       # full UTF-8 text (including Arabic) for Speech
         self.vocab_mode = "30"
 
     def cam_ok(self):
@@ -114,10 +119,15 @@ class Speech:
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         threading.Thread(target=self._run, daemon=True).start()
 
-    def say(self, s, interrupt=False):
-        s = "".join(ch for ch in str(s) if ch.isalnum() or ch in " '.,?!").strip()
+    def say(self, s, lang="en", interrupt=False):
+        s = "".join(
+            ch for ch in str(s)
+            if ch.isalnum() or ch in " '.,?!،؟" or "\u0600" <= ch <= "\u06ff"
+        ).strip()
         if not s:
             return
+        voice = "ar" if (lang == "ar" or any("\u0600" <= ch <= "\u06ff" for ch in s)) else "en-us"
+        speed = "135" if voice == "ar" else "150"
         if interrupt:
             while not self.q.empty():
                 try:
@@ -129,13 +139,13 @@ class Speech:
                 self.q.get_nowait()
             except queue.Empty:
                 pass
-        self.q.put(s)
+        self.q.put((voice, speed, s))
 
     def _run(self):
         while True:
-            s = self.q.get()
-            log("Speech", s)
-            subprocess.run(["espeak-ng", "-v", "en-us", "-s", "150", "-a", "200", s],
+            voice, speed, s = self.q.get()
+            log("Speech", f"({voice}) {s}")
+            subprocess.run(["espeak-ng", "-v", voice, "-s", speed, "-a", "200", s],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -160,8 +170,10 @@ class Esp:
                 hint = "Camera is not sending frames"
             else:
                 hint = st.hint
-            return {"m": st.mode, "t": clean(st.text)[-60:], "h": int(bool(st.hand and ai and cam)),
-                    "c": int(cam), "a": int(ai), "g": clean(st.guess)[:6], "i": clean(hint)[:39]}
+            return {"m": st.mode, "l": st.sign_lang, "o": st.out_lang,
+                    "t": clean(st.text)[-60:], "u": st.ar_hex,
+                    "h": int(bool(st.hand and ai and cam)),
+                    "c": int(cam), "a": int(ai), "g": clean(st.guess)[:6], "i": clean(hint)[:26]}
 
     def queue_cmd(self, c):
         with self.st.lock:
@@ -169,6 +181,8 @@ class Esp:
             self.st.text_gate = self.st.seq + 1
             if c == "clear":
                 self.st.text = ""
+                self.st.ar_hex = ""
+                self.st.speak_text = ""
 
     def on_line(self, line):
         st = self.st
@@ -182,6 +196,27 @@ class Esp:
                     st.hint = ""
                     st.mode_gate = st.seq + 1
                     st.cmds.append("mode:" + m)
+            elif cmd.startswith("SIGN:"):
+                sl = cmd[5:].strip().lower()
+                if sl in ("asl", "arsl"):
+                    with st.lock:
+                        st.sign_lang = sl
+                        if sl == "arsl" and st.out_lang == "en":
+                            st.out_lang = "ar"
+                        st.text = ""
+                        st.ar_hex = ""
+                        st.speak_text = ""
+                        st.hint = ""
+                        st.lang_gate = st.seq + 1
+                        st.text_gate = st.seq + 1
+                        st.cmds.append("sign:" + sl)
+            elif cmd.startswith("LANG:"):
+                ol = cmd[5:].strip().lower()
+                if ol in ("en", "ar"):
+                    with st.lock:
+                        st.out_lang = ol
+                        st.lang_gate = st.seq + 1
+                        st.cmds.append("lang:" + ol)
             elif cmd == "SPACE":
                 self.queue_cmd("space")
             elif cmd == "DEL":
@@ -190,8 +225,9 @@ class Esp:
                 self.queue_cmd("clear")
             elif cmd == "SPEAK":
                 with st.lock:
-                    t = st.text
-                self.speech.say(t if t.strip() else "Nothing to say", interrupt=True)
+                    t = st.speak_text or st.text
+                    ol = st.out_lang
+                self.speech.say(t if t.strip() else "Nothing to say", lang=ol, interrupt=True)
             elif cmd == "TOGGLE_VOCAB":
                 self.queue_cmd("toggle_vocab")
         elif line == "READY":
@@ -276,9 +312,9 @@ def serve_ai(st, speech, conn):
                 if send:
                     st.cmds = []
                     st.seq += 1
-                    seq, mode = st.seq, st.mode
+                    seq, mode, sl, ol = st.seq, st.mode, st.sign_lang, st.out_lang
             if send:
-                hdr = json.dumps({"seq": seq, "mode": mode, "cmds": cmds}).encode()
+                hdr = json.dumps({"seq": seq, "mode": mode, "sign_lang": sl, "out_lang": ol, "cmds": cmds}).encode()
                 jpg = frame if new else b""
                 conn.sendall(struct.pack(">II", len(hdr), len(jpg)) + hdr + jpg)
                 if new:
@@ -287,17 +323,24 @@ def serve_ai(st, speech, conn):
         readable, _, _ = select.select([conn], [], [], 0.02)
         if readable:
             n = struct.unpack(">I", recv_exact(conn, 4))[0]
-            res = json.loads(recv_exact(conn, n))
+            res = json.loads(recv_exact(conn, n).decode("utf-8"))
             with st.lock:
                 st.ai = 1
                 st.hand = 1 if res.get("hand") else 0
                 st.guess, st.hint = res.get("guess", ""), res.get("hint", "")
                 if res.get("seq", 0) >= st.text_gate:
                     st.text = res.get("text", "")
+                    st.ar_hex = res.get("ar_hex", "")
+                    st.speak_text = res.get("full_text", res.get("text", ""))
                 if res.get("seq", 0) >= st.mode_gate and res.get("mode"):
                     st.mode = res["mode"]
+                if res.get("seq", 0) >= st.lang_gate:
+                    if res.get("sign_lang"):
+                        st.sign_lang = res["sign_lang"]
+                    if res.get("out_lang"):
+                        st.out_lang = res["out_lang"]
             if res.get("speak"):
-                speech.say(res["speak"])
+                speech.say(res["speak"], lang=res.get("speak_lang", "en"))
             waiting = False
         elif waiting and time.time() - sent_at > 6:
             raise TimeoutError("AI engine stopped answering")

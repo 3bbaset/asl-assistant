@@ -16,6 +16,8 @@ from phrase_common import frame_features, clip_vector
 from motion_common import fill_gaps
 from words_common import MODEL_FILE as WORD_MODEL_FILE, format_sentence
 from words_live import WordSegmenter, classify as classify_word
+from arsl_common import classify_arsl_word
+import translator
 
 parser = argparse.ArgumentParser(description="ASL Assistant: Multi-Mode Recognition (Alphabets, Spelling, Words, Sentences)")
 parser.add_argument("--source", default=0, help="Camera index or video stream URL")
@@ -54,6 +56,10 @@ REPLACE_SLACK = 0.3     # a lookalike typed up to this long before the movement 
 model = joblib.load("asl_model_v2.joblib")
 motion_model = joblib.load("motion_model2.joblib")
 word_model = joblib.load(ACTIVE_WORD_MODEL) if os.path.exists(ACTIVE_WORD_MODEL) else None
+arsl_alpha_model = joblib.load("arsl_alpha_model.joblib") if os.path.exists("arsl_alpha_model.joblib") else None
+arsl_word_model = joblib.load("arsl_word_model_30.joblib") if os.path.exists("arsl_word_model_30.joblib") else None
+sign_lang = "asl"
+out_lang = "en"
 
 def one_thread(m):
     """Predicting ONE sample on many threads is slower than on one (thread start-up cost on every
@@ -69,6 +75,8 @@ def one_thread(m):
 one_thread(model)
 one_thread(motion_model)
 one_thread(word_model)
+one_thread(arsl_alpha_model)
+one_thread(arsl_word_model)
 try:
     from threadpoolctl import threadpool_limits
     threadpool_limits(limits=1)      # same idea for the OpenMP/BLAS threads inside boosting / neural nets
@@ -213,14 +221,15 @@ sentence_spoken = True
 def switch_mode(new_mode, cur_time):
     global mode, word_seg, streak_label, streak, flash_label, flash_until
     global sentence_words, sentence_text, sentence_spoken
-    if new_mode in ("words", "sentences") and word_model is None:
+    has_word = (arsl_word_model is not None) if sign_lang == "arsl" else (word_model is not None)
+    if new_mode in ("words", "sentences") and not has_word:
         flash_label, flash_until = "Word model not found!", cur_time + 1.5
         return
     mode = new_mode
     mbuf.clear()
     history.clear()
     streak_label, streak = None, 0
-    word_seg = WordSegmenter()
+    word_seg = WordSegmenter(max_sign=3.0 if new_mode == "sentences" else 4.0)
     if mode == "sentences":
         sentence_words.clear()
         sentence_text = ""
@@ -228,10 +237,10 @@ def switch_mode(new_mode, cur_time):
     mode_titles = {
         "alphabets": "1: ALPHABETS (Live Inspection)",
         "spelling": "2: SPELLING (Fingerspelling Typing)",
-        "words": "3: WORDS (Whole-Word ASL)",
-        "sentences": "4: SENTENCES (Continuous ASL)",
+        "words": "3: WORDS (Whole-Word)",
+        "sentences": "4: SENTENCES (Continuous)",
     }
-    flash_label, flash_until = f"Switched to {mode_titles.get(mode, mode.upper())}", cur_time + 1.5
+    flash_label, flash_until = f"{sign_lang.upper()}>{out_lang.upper()} {mode_titles.get(mode, mode.upper())}", cur_time + 1.5
 
 camera = LatestFrame(SOURCE)
 if not camera.alive:
@@ -262,32 +271,53 @@ while True:
         mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(raw, cv2.COLOR_BGR2RGB)), ts)
     lap("motion", t1)
 
-    if mode in ("words", "sentences") and word_model is not None:
+    active_wm = arsl_word_model if sign_lang == "arsl" else word_model
+    if mode in ("words", "sentences") and active_wm is not None:
         for h_lm in res.hand_landmarks:
             draw_hand(frame, [SimpleNamespace(x=1 - p.x, y=p.y, z=p.z) for p in h_lm])
         t1 = time.perf_counter()
         w_clip = word_seg.update(res, now)
         if w_clip is not None:
-            w_pred, w_prob, w_ranked = classify_word(word_model, w_clip)
-            word_top3 = "   ".join(f"{w} {p:.0%}" for w, p in w_ranked[:3])
-            dbg_detail = word_top3
-            if w_pred != "IDLE" and w_prob >= WORD_THRESH:
-                if mode == "words":
-                    if text and not text.endswith(" "):
-                        text += " "
-                    text += w_pred + " "
-                    speak(w_pred)
-                    last_typed = (now, w_pred, "word")
-                    flash_label, flash_until = f"{w_pred} ({w_prob:.0%})", now + 2.0
-                else:  # sentences mode: successive words accumulation
-                    if not (sentence_words and sentence_words[-1] == w_pred and now - sentence_last_time < 1.2):
-                        sentence_words.append(w_pred)
-                        sentence_last_time = now
-                        sentence_spoken = False
-                        sentence_text = format_sentence(sentence_words)
-                        flash_label, flash_until = f"+ {w_pred} ({len(sentence_words)} words)", now + 1.8
+            if sign_lang == "arsl":
+                w_id, w_prob, w_ranked = classify_arsl_word(active_wm, w_clip)
+                word_top3 = "   ".join(f"{translator.translate_arsl_word(w, 'en')[:10]} {p:.0%}" for w, p in w_ranked[:3])
+                dbg_detail = word_top3
+                w_disp = translator.translate_arsl_word(w_id, out_lang)
+                w_en = translator.translate_arsl_word(w_id, "en")
+                if w_prob >= 0.25:
+                    if mode == "words":
+                        text = w_disp
+                        speak(w_disp if out_lang == "en" else w_en)
+                        last_typed = (now, w_disp, "word")
+                        flash_label, flash_until = f"{w_en} ({w_prob:.0%})", now + 2.0
+                    else:
+                        if not (sentence_words and sentence_words[-1] == w_en and now - sentence_last_time < 1.2):
+                            sentence_words.append(w_en)
+                            sentence_last_time = now
+                            sentence_spoken = False
+                            sentence_text = format_sentence(sentence_words)
+                            flash_label, flash_until = f"+ {w_en} ({len(sentence_words)} words)", now + 1.8
+                else:
+                    flash_label, flash_until = f"? ({w_en} {w_prob:.0%})", now + 1.5
             else:
-                flash_label, flash_until = f"? ({w_pred} {w_prob:.0%})", now + 1.5
+                w_pred, w_prob, w_ranked = classify_word(active_wm, w_clip)
+                word_top3 = "   ".join(f"{w} {p:.0%}" for w, p in w_ranked[:3])
+                dbg_detail = word_top3
+                if w_pred != "IDLE" and w_prob >= WORD_THRESH:
+                    if mode == "words":
+                        text = w_pred
+                        speak(w_pred)
+                        last_typed = (now, w_pred, "word")
+                        flash_label, flash_until = f"{w_pred} ({w_prob:.0%})", now + 2.0
+                    else:  # sentences mode: successive words accumulation
+                        if not (sentence_words and sentence_words[-1] == w_pred and now - sentence_last_time < 1.2):
+                            sentence_words.append(w_pred)
+                            sentence_last_time = now
+                            sentence_spoken = False
+                            sentence_text = format_sentence(sentence_words)
+                            flash_label, flash_until = f"+ {w_pred} ({len(sentence_words)} words)", now + 1.8
+                else:
+                    flash_label, flash_until = f"? ({w_pred} {w_prob:.0%})", now + 1.5
         lap("eval", t1)
 
         # In sentences mode: auto-speak when user pauses for 1.8s after signing words
@@ -352,15 +382,17 @@ while True:
             lm = detect(detector, cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
         letter, top2 = None, ""
-        if lm:
+        active_am = arsl_alpha_model if (sign_lang == "arsl" and arsl_alpha_model is not None) else model
+        if lm and active_am is not None:
             last_seen = now
-            probs = model.predict_proba([normalize(lm).flatten()])[0]
+            probs = active_am.predict_proba([normalize(lm).flatten()])[0]
             order = probs.argsort()[::-1]
             first, second = order[0], order[1]
-            top2 = (f"{model.classes_[first]} {probs[first]:.0%}   "
-                    f"{model.classes_[second]} {probs[second]:.0%}")
+            c1 = translator.translate_arsl_letter(active_am.classes_[first], "en") if sign_lang == "arsl" else str(active_am.classes_[first])
+            c2 = translator.translate_arsl_letter(active_am.classes_[second], "en") if sign_lang == "arsl" else str(active_am.classes_[second])
+            top2 = f"{c1} {probs[first]:.0%}   {c2} {probs[second]:.0%}"
             if probs[first] >= MIN_CONF:
-                letter = model.classes_[first]
+                letter = translator.translate_arsl_letter(active_am.classes_[first], out_lang) if sign_lang == "arsl" else str(active_am.classes_[first])
             draw_hand(frame, lm)
         else:
             if now - last_seen > UNLOCK_AFTER:   # hand really left, not just a flicker
@@ -421,8 +453,8 @@ while True:
         "words": "3: WORDS",
         "sentences": "4: SENTENCES",
     }
-    badge = f"[{mode_badges.get(mode, mode.upper())}]"
-    draw_text(frame, badge, (w - 240, 40), scale=0.7, color=(0, 220, 255), thick=2)
+    badge = f"[{sign_lang.upper()}>{out_lang.upper()} {mode_badges.get(mode, mode.upper())}]"
+    draw_text(frame, badge, (w - 300, 40), scale=0.65, color=(0, 220, 255), thick=2)
 
     if debug:
         draw_text(frame, f"move {dbg_move:.2f} (needs {MOVE_MIN:.2f})   {dbg_detail}", (12, 84),
@@ -438,13 +470,30 @@ while True:
         display_text = f"Buffer: {text[-24:]}" if text else "(Inspection Mode - typing paused)"
         draw_text(frame, display_text, (12, h - 16), scale=0.85, color=(180, 180, 180))
     elif mode == "sentences":
-        display_text = f'Sentence: "{sentence_text}"' if sentence_text else 'Sentence: (waiting for words...)'
-        draw_text(frame, display_text, (12, h - 16), scale=0.95, color=(255, 255, 255))
+        if out_lang == "ar" and sentence_text:
+            ar_s = translator.shape_arabic(translator.translate_en_to_ar(sentence_text))
+            from PIL import Image, ImageDraw, ImageFont
+            pil_f = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            fnt = ImageFont.truetype(r"C:\Windows\Fonts\tahoma.ttf", 22) if os.path.exists(r"C:\Windows\Fonts\tahoma.ttf") else ImageFont.load_default()
+            ImageDraw.Draw(pil_f).text((12, h - 46), ar_s, font=fnt, fill=(255, 255, 255))
+            frame = cv2.cvtColor(np.asarray(pil_f), cv2.COLOR_RGB2BGR)
+        else:
+            display_text = f'Sentence: "{sentence_text}"' if sentence_text else 'Sentence: (waiting for words...)'
+            draw_text(frame, display_text, (12, h - 16), scale=0.95, color=(255, 255, 255))
     else:
-        draw_text(frame, text[-30:], (12, h - 16), scale=1.1, color=(255, 255, 255))
+        raw_shown = text[-30:]
+        if out_lang == "ar" and raw_shown:
+            ar_s = translator.shape_arabic(raw_shown if any("\u0600" <= ch <= "\u06ff" for ch in raw_shown) else translator.translate_en_to_ar(raw_shown))
+            from PIL import Image, ImageDraw, ImageFont
+            pil_f = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            fnt = ImageFont.truetype(r"C:\Windows\Fonts\tahoma.ttf", 22) if os.path.exists(r"C:\Windows\Fonts\tahoma.ttf") else ImageFont.load_default()
+            ImageDraw.Draw(pil_f).text((12, h - 46), ar_s, font=fnt, fill=(255, 255, 255))
+            frame = cv2.cvtColor(np.asarray(pil_f), cv2.COLOR_RGB2BGR)
+        else:
+            draw_text(frame, raw_shown, (12, h - 16), scale=1.1, color=(255, 255, 255))
 
-    shortcuts = "1:Alpha 2:Spell 3:Word 4:Sent | m=cycle"
-    draw_text(frame, shortcuts, (w - 420, h - 16), scale=0.55, color=(0, 255, 180), thick=1)
+    shortcuts = "1-4:Mode | l:ASL/ArSL | t:EN/AR | m:cycle"
+    draw_text(frame, shortcuts, (w - 430, h - 16), scale=0.52, color=(0, 255, 180), thick=1)
     cv2.imshow("ASL assistant", frame)
     fps_n += 1
     if now - fps_t >= 1.0:
@@ -453,6 +502,17 @@ while True:
     key = cv2.waitKey(1) & 0xFF
     if key == ord("q"):
         break
+    elif key == ord("l"):
+        sign_lang = "arsl" if sign_lang == "asl" else "asl"
+        if sign_lang == "arsl" and out_lang == "en":
+            out_lang = "ar"
+        text = ""
+        sentence_words.clear()
+        sentence_text = ""
+        flash_label, flash_until = f"Input: {sign_lang.upper()} -> {out_lang.upper()}", now + 1.5
+    elif key == ord("t"):
+        out_lang = "ar" if out_lang == "en" else "en"
+        flash_label, flash_until = f"Output Language: {out_lang.upper()}", now + 1.5
     elif key == ord("1"):
         switch_mode("alphabets", now)
     elif key == ord("2"):

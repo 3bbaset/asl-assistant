@@ -6,3 +6,8 @@ numpy==1.26.4
 opencv-contrib-python==4.11.0.86
 scikit-learn==1.9.1
 threadpoolctl==3.7.0
+numpy==1.26.4
+pyarrow==17.0.0
+arabic-reshaper
+python-bidi
+deep-translator

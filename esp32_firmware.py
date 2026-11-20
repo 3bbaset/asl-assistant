@@ -209,8 +209,73 @@ MODES = (("ALPHA", "alphabets"), ("SPELL", "spelling"), ("W:30", "words"), ("W:2
 TAB_W = 64
 BUTTONS = (("SPACE", "CMD:SPACE", 0x2A69), ("DEL", "CMD:DEL", 0x52AA),
            ("CLEAR", "CMD:CLEAR", DKRED), ("SPEAK", "CMD:SPEAK", 0x0451))
-st = {"m": "", "t": None, "h": None, "c": None, "a": None, "g": None, "i": None, "link": None}
+st = {"m": "", "l": "asl", "o": "en", "u": "", "t": None, "h": None, "c": None, "a": None, "g": None, "i": None, "link": None}
 last_rx = 0
+try:
+    with open("ar_font.bin", "rb") as _af:
+        _AR_FONT = _af.read()
+except Exception:
+    _AR_FONT = None
+
+
+@micropython.native
+def _raster_ar_row(font_bytes, g_list, ng, r, fg_hi, fg_lo, bg_hi, bg_lo, dst):
+    di = 0
+    for gi in range(ng):
+        g = g_list[gi]
+        off = g * 32 + r * 2
+        b0 = font_bytes[off]
+        b1 = font_bytes[off + 1]
+        mask = 0x80
+        for _ in range(8):
+            if b0 & mask:
+                dst[di] = fg_hi; dst[di + 1] = fg_lo
+            else:
+                dst[di] = bg_hi; dst[di + 1] = bg_lo
+            di += 2
+            mask >>= 1
+        mask = 0x80
+        for _ in range(8):
+            if b1 & mask:
+                dst[di] = fg_hi; dst[di + 1] = fg_lo
+            else:
+                dst[di] = bg_hi; dst[di + 1] = bg_lo
+            di += 2
+            mask >>= 1
+
+
+def draw_ar_text(x, y, w, h, hex_str, fg, bg):
+    """Render up to 2 lines of pre-shaped 16x16 Arabic glyphs from hex indices ('FF' = newline)."""
+    fill(x, y, w, h, bg)
+    if not _AR_FONT or not hex_str:
+        return
+    max_g = len(_AR_FONT) // 32
+    lines = []
+    for seg in hex_str.split("FF"):
+        gs = []
+        for i in range(0, len(seg) - 1, 2):
+            idx = int(seg[i:i + 2], 16)
+            gs.append(idx if idx < max_g else 0)
+        if gs:
+            lines.append(gs[:19])
+    lines = lines[:2]
+    if not lines:
+        return
+    fg_hi, fg_lo = fg >> 8, fg & 0xFF
+    bg_hi, bg_lo = bg >> 8, bg & 0xFF
+    total_h = len(lines) * 18 - 2
+    cy = y + max(0, (h - total_h) // 2)
+    for gs in lines:
+        ng = len(gs)
+        lw = ng * 16
+        gx = x + max(4, w - lw - 6)
+        row_buf = bytearray(lw * 2)
+        window(gx, cy, lw, 16)
+        for r in range(16):
+            _raster_ar_row(_AR_FONT, gs, ng, r, fg_hi, fg_lo, bg_hi, bg_lo, row_buf)
+            spi.write(row_buf)
+        cs.value(1)
+        cy += 18
 
 def draw_tabs(active):
     for i, (label, key) in enumerate(MODES):
@@ -254,10 +319,14 @@ def draw_guess():
         text(214, 40, 104, 54, g, CYAN, PANEL, 2 if len(g) <= 4 else 1)
 
 def draw_text():
+    if st["o"] == "ar" and st["u"] and _AR_FONT:
+        draw_ar_text(2, 98, 316, 64, st["u"], WHITE, DARK)
+        return
     t = st["t"] or ""
     t = t[-40:]
     if not t:
-        text(2, 98, 316, 64, "Start signing...", GREY, DARK, 2)
+        msg = "AR ready..." if st["o"] == "ar" else "Start signing..."
+        text(2, 98, 316, 64, msg, GREY, DARK, 2)
         return
     l1, l2 = (t[:20], t[20:]) if len(t) > 20 else (t, "")
     if l2 == "":
@@ -265,7 +334,13 @@ def draw_text():
     text(2, 98, 316, 64, l1 + "\n" + l2, WHITE, DARK, 2, "l")
 
 def draw_hint():
-    text(2, 164, 316, 30, (st["i"] or "")[:39], 0xBDF7, PANEL, 1)
+    text(2, 164, 206, 30, (st["i"] or "")[:25], 0xBDF7, PANEL, 1)
+
+def draw_lang_toggles():
+    sl_on = (st["l"] == "arsl")
+    ol_on = (st["o"] == "ar")
+    text(210, 164, 53, 30, "IN:AR" if sl_on else "IN:ASL", DARK if sl_on else WHITE, ORANGE if sl_on else TAB, 1)
+    text(265, 164, 53, 30, "OUT:AR" if ol_on else "OUT:EN", DARK if ol_on else WHITE, GREEN if ol_on else TAB, 1)
 
 def draw_buttons(pressed=-1):
     for i, (label, _, col) in enumerate(BUTTONS):
@@ -274,7 +349,7 @@ def draw_buttons(pressed=-1):
 
 def draw_all():
     fill(0, 0, 320, 240, BG)
-    draw_tabs(st["m"]); draw_cam(); draw_hand(); draw_guess(); draw_text(); draw_hint(); draw_buttons()
+    draw_tabs(st["m"]); draw_cam(); draw_hand(); draw_guess(); draw_text(); draw_hint(); draw_lang_toggles(); draw_buttons()
 
 # ------------------------------------------------------------------ Message handling
 def handle_line(line):
@@ -302,6 +377,13 @@ def handle_line(line):
             new[k] = v
     if "m" in new and new["m"] != st["m"]:
         st["m"] = new["m"]; draw_tabs(st["m"])
+    lang_dirty = False
+    if "l" in new and new["l"] in ("asl", "arsl") and new["l"] != st["l"]:
+        st["l"] = new["l"]; lang_dirty = True
+    if "o" in new and new["o"] in ("en", "ar") and new["o"] != st["o"]:
+        st["o"] = new["o"]; lang_dirty = True
+    if lang_dirty:
+        draw_lang_toggles()
     for k in ("c", "h", "a"):
         if k in new:
             v = new[k] == "1"
@@ -309,8 +391,13 @@ def handle_line(line):
                 st[k] = v; draw_cam(); draw_hand()
     if "g" in new and new["g"] != st["g"]:
         st["g"] = new["g"]; draw_guess()
+    text_dirty = False
+    if "u" in new and new["u"] != st["u"]:
+        st["u"] = new["u"]; text_dirty = True
     if "t" in new and new["t"] != st["t"]:
-        st["t"] = new["t"]; draw_text()
+        st["t"] = new["t"]; text_dirty = True
+    if text_dirty or lang_dirty:
+        draw_text()
     if "i" in new and new["i"] != st["i"]:
         st["i"] = new["i"]; draw_hint()
 
@@ -337,12 +424,24 @@ def on_tap(x, y):
         st["m"] = target
         draw_tabs(target)
         out("CMD:MODE:" + target)
+    elif 162 <= y < 196 and x >= 208:
+        if x < 264:
+            st["l"] = "arsl" if st["l"] == "asl" else "asl"
+            if st["l"] == "arsl" and st["o"] == "en":
+                st["o"] = "ar"
+            st["u"] = ""; st["t"] = ""
+            draw_lang_toggles(); draw_text()
+            out("CMD:SIGN:" + st["l"])
+        else:
+            st["o"] = "ar" if st["o"] == "en" else "en"
+            draw_lang_toggles(); draw_text()
+            out("CMD:LANG:" + st["o"])
     elif y >= 196:
         i = min(3, x // 80)
         draw_buttons(i)
         out(BUTTONS[i][1])
         if BUTTONS[i][1] == "CMD:CLEAR":
-            st["t"] = ""; draw_text()
+            st["t"] = ""; st["u"] = ""; draw_text()
         time.sleep_ms(90)
         draw_buttons()
 

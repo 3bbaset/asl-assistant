@@ -23,9 +23,12 @@ hf_files.txt
 hf_broken.txt
 tmp_batch_mp4/
 batches/
+data_arsl/
+translation_cache.json
 all_clips.npz
 word_model_full_2021.joblib
 word_model_curated_30.joblib
+arsl_word_model_30.joblib
 asl_nn_best.pt
 training_scaling_log.csv
 full_training_report*.json

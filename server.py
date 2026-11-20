@@ -31,6 +31,20 @@ BRAIN = None
 TOKEN = None
 
 
+def _one_thread(m):
+    if m is None:
+        return
+    steps = list((getattr(m, "named_steps", None) or {"model": m}).values())
+    for step in steps:
+        if hasattr(step, "n_jobs"):
+            step.n_jobs = 1
+        for sub in list(getattr(step, "estimators_", ())) + (list(step.estimators) if isinstance(getattr(step, "estimators", None), list) else []):
+            if hasattr(sub, "n_jobs"):
+                sub.n_jobs = 1
+            if hasattr(sub, "named_steps"):
+                _one_thread(sub)
+
+
 def build_real_brain():
     import joblib
     import mediapipe as mp
@@ -44,6 +58,10 @@ def build_real_brain():
     m_full_path = "word_model_full_2021.joblib"
     word_model_30 = joblib.load(m30_path) if os.path.exists(m30_path) else None
     word_model_full = joblib.load(m_full_path) if os.path.exists(m_full_path) else None
+    arsl_alpha_model = joblib.load("arsl_alpha_model.joblib") if os.path.exists("arsl_alpha_model.joblib") else None
+    arsl_word_model = joblib.load("arsl_word_model_30.joblib") if os.path.exists("arsl_word_model_30.joblib") else None
+    for mdl in (alpha_model, motion_model, word_model_30, word_model_full, arsl_alpha_model, arsl_word_model):
+        _one_thread(mdl)
     alpha_det = make_detector(min_conf=0.6)            # IMAGE mode, 1 hand, as in app.py
     opts = vision.HandLandmarkerOptions(
         base_options=mp_python.BaseOptions(model_asset_path="hand_landmarker.task"),
@@ -59,7 +77,8 @@ def build_real_brain():
 
     return Brain(alpha_model, motion_model,
                  lambda rgb: detect(alpha_det, rgb), motion_detect,
-                 word_model=word_model_30, word_model_full=word_model_full)
+                 word_model=word_model_30, word_model_full=word_model_full,
+                 arsl_alpha_model=arsl_alpha_model, arsl_word_model=arsl_word_model)
 
 
 def build_stub_brain():
