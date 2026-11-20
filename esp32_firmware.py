@@ -424,7 +424,7 @@ def on_tap(x, y):
         st["m"] = target
         draw_tabs(target)
         out("CMD:MODE:" + target)
-    elif 162 <= y < 196 and x >= 208:
+    elif 160 <= y < 196 and x >= 204:
         if x < 264:
             st["l"] = "arsl" if st["l"] == "asl" else "asl"
             if st["l"] == "arsl" and st["o"] == "en":
@@ -492,7 +492,7 @@ while True:
             if pressed_since is None:
                 pressed_since = now; press_handled = False
                 out("TOUCH:%d,%d" % (x, y))
-                if not (98 <= y < 196):
+                if not (98 <= y < 160 or (160 <= y < 196 and x < 204)):
                     on_tap(x, y); press_handled = True
             elif not press_handled and time.ticks_diff(now, pressed_since) > 3000:
                 press_handled = True
