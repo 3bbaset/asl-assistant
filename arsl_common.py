@@ -151,8 +151,8 @@ def classify_arsl_word(model, clip_30x130):
 
     mid = [i for i in active_idx if 5 <= i <= 24]
     use_idx = mid if len(mid) >= 3 else active_idx.tolist()
-    if len(use_idx) > 10:
-        sel = np.linspace(0, len(use_idx) - 1, 10).round().astype(int)
+    if len(use_idx) > 5:
+        sel = np.linspace(0, len(use_idx) - 1, 5).round().astype(int)
         use_idx = [use_idx[j] for j in sel]
 
     feats = arsl_batch_features(raw_clip[use_idx])

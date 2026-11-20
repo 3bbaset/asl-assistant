@@ -5,9 +5,9 @@ import numpy as np
 from phrase_common import frame_features, clip_vector
 from motion_common import fill_gaps
 
-GONE_AFTER = 0.4    # seconds without hands = the word is finished
-MIN_SIGN = 0.3      # shorter than this = a flicker, ignored
-MAX_SIGN = 4.0      # longer than this = finish anyway
+GONE_AFTER = 0.22   # seconds without hands = the word is finished
+MIN_SIGN = 0.22     # shorter than this = a flicker, ignored
+MAX_SIGN = 2.0      # longer than this = finish anyway
 
 
 def speak(s):

@@ -33,23 +33,24 @@ from translator import (
 
 
 class Config:
-    # --- alphabet typing (same values as app.py) ---
-    WINDOW = 0.6          # seconds a letter must be held
-    AGREE = 0.8           # share of the window the same letter must win
-    MIN_CONF = 0.6        # ignore guesses the model is unsure about
-    UNLOCK_AFTER = 0.5    # seconds without a hand before the same letter can repeat
+    # --- alphabet typing (tuned for responsive real-time speed) ---
+    WINDOW = 0.35         # seconds a letter must be held
+    AGREE = 0.75          # share of the window the same letter must win
+    MIN_CONF = 0.55       # ignore guesses the model is unsure about when typing
+    PREVIEW_CONF = 0.35   # minimum confidence to show live preview in GUESS box
+    UNLOCK_AFTER = 0.28   # seconds without a hand before the same letter can repeat
     # --- J/Z motion ---
     MOTION_DUR = 1.5      # clip length the model was trained on
-    MOTION_EVERY = 0.4    # how often to ask the model while a hand is moving
+    MOTION_EVERY = 0.30   # how often to ask the model while a hand is moving
     MOTION_MIN_SEEN = 0.6 # hand must be tracked in this share of the clip
     MOTION_MIN_PATH = 0.05  # fingertip must travel at least this far (cheap gate; UNTUNED)
     MOTION_THRESH = 0.6   # J or Z only if the model is at least this sure (as try_motion.py)
-    MOTION_COOLDOWN = 1.5 # seconds of silence after a J/Z
+    MOTION_COOLDOWN = 1.0 # seconds of silence after a J/Z
     # J starts as an I hand and Z starts as a pointing hand, so the alphabet model may
     # type that lookalike first. If a J/Z follows, the lookalike is replaced.
     REPLACE = {"J": {"I"}, "Z": {"D", "G", "L", "X"}}
-    REPLACE_WITHIN = 2.5  # seconds
-    WORD_THRESH = 0.35    # minimum probability to accept a signed word (96%+ precision)
+    REPLACE_WITHIN = 1.8  # seconds
+    WORD_THRESH = 0.35    # minimum probability to accept a signed word
     MAX_TEXT = 500
 
 
@@ -81,7 +82,9 @@ class Brain:
         self.word_top3_ar = ""
         self.last_top3 = []
         self.last_hint_ar = ""
+        self.last_guess = ""
         self.last_guess_ar = ""
+        self.last_word_guess = (0.0, "", "")
         self.text = ""
         self.sentence_words = []
         self.sentence_words_ar = []
@@ -123,8 +126,10 @@ class Brain:
         self.word_top3_ar = ""
         self.last_top3 = []
         self.last_hint_ar = ""
+        self.last_guess = ""
         self.last_guess_ar = ""
-        self.word_seg = WordSegmenter(max_sign=3.0 if self.mode == "sentences" else 4.0)
+        self.last_word_guess = (0.0, "", "")
+        self.word_seg = WordSegmenter(max_sign=1.6 if self.sign_lang == "arsl" else 2.0)
 
     def set_out_lang(self, lang):
         lang = str(lang).strip().lower()
@@ -190,8 +195,11 @@ class Brain:
             self.locked = None
             self.last_top3 = []
             self.word_top3 = ""
+            self.last_guess = ""
+            self.last_guess_ar = ""
+            self.last_word_guess = (0.0, "", "")
             self._arsl_last_word_id = None
-            self.word_seg = WordSegmenter(max_sign=3.0 if mode == "sentences" else 4.0)
+            self.word_seg = WordSegmenter(max_sign=1.6 if self.sign_lang == "arsl" else 2.0)
             if mode == "words":
                 self.text = ""
             elif mode == "sentences":
@@ -298,17 +306,29 @@ class Brain:
             current_text = self.text
         elif self.mode == "alphabets":
             flipped = cv2.flip(rgb, 1)
-            self._alpha_future = self._pool.submit(self._alpha_detect_raw, flipped)
-            hand_pts = self._motion_step_inspect(rgb, now)
-            letter, top2 = self._alpha_step_inspect(flipped, now)
-            self._alpha_future = None
+            if self.sign_lang == "arsl":
+                lm = self._alpha_detect_raw(flipped)
+                hand_pts = [[round(1.0 - p.x, 4), round(p.y, 4)] for p in lm] if lm else []
+                self._hands = [hand_pts] if hand_pts else []
+                letter, top2 = self._alpha_step_inspect(flipped, now, lm=lm)
+            else:
+                self._alpha_future = self._pool.submit(self._alpha_detect_raw, flipped)
+                hand_pts = self._motion_step_inspect(rgb, now)
+                letter, top2 = self._alpha_step_inspect(flipped, now)
+                self._alpha_future = None
             current_text = self.text
         else: # "spelling"
             flipped = cv2.flip(rgb, 1)
-            self._alpha_future = self._pool.submit(self._alpha_detect_raw, flipped)
-            hand_pts = self._motion_step(rgb, now)
-            letter, top2 = self._alpha_step(flipped, now)
-            self._alpha_future = None
+            if self.sign_lang == "arsl":
+                lm = self._alpha_detect_raw(flipped)
+                hand_pts = [[round(1.0 - p.x, 4), round(p.y, 4)] for p in lm] if lm else []
+                self._hands = [hand_pts] if hand_pts else []
+                letter, top2 = self._alpha_step(flipped, now, lm=lm)
+            else:
+                self._alpha_future = self._pool.submit(self._alpha_detect_raw, flipped)
+                hand_pts = self._motion_step(rgb, now)
+                letter, top2 = self._alpha_step(flipped, now)
+                self._alpha_future = None
             current_text = self.text
 
         translated_text = self._translate_cached(current_text)
@@ -330,6 +350,7 @@ class Brain:
             "mode": self.mode,
             "words": list(self.sentence_words) if self.mode == "sentences" else [],
             "letter": letter,                 # what the alphabet model sees right now
+            "guess": self.last_guess,
             "top2": top2,
             "hint_ar": self.last_hint_ar,
             "guess_ar": self.last_guess_ar,
@@ -358,10 +379,12 @@ class Brain:
                 self.word_top3_ar = "  ".join(f"{translate_arsl_word(w, 'ar')} {p:.0%}" for w, p in w_ranked[:2])
                 self.motion_info = (now, self.word_top3)
                 thresh = 0.25
+                w_en = translate_arsl_word(w_id, "en")
+                w_ar = translate_arsl_word(w_id, "ar")
+                g_ar = w_ar.split()[0] if len(w_ar.split()[0]) <= 6 else f"{w_prob:.0%}"
+                self.last_word_guess = (now, f"{w_prob:.0%}", g_ar)
                 if w_prob >= thresh:
-                    w_en = translate_arsl_word(w_id, "en")
-                    w_ar = translate_arsl_word(w_id, "ar")
-                    if not (self.sentence_words and self.sentence_words[-1] == w_en and now - self.sentence_last_time < 1.2):
+                    if not (self.sentence_words and self.sentence_words[-1] == w_en and now - self.sentence_last_time < 0.9):
                         self.sentence_words.append(w_en)
                         self.sentence_words_ar.append(w_ar)
                         self.sentence_last_time = now
@@ -381,8 +404,12 @@ class Brain:
                 self.word_top3 = "   ".join(f"{w} {p:.0%}" for w, p in w_ranked[:3])
                 self.word_top3_ar = "  ".join(f"{translate_en_to_ar(str(w))} {p:.0%}" for w, p in w_ranked[:2])
                 self.motion_info = (now, self.word_top3)
+                g_ar = translate_en_to_ar(str(w_pred)).split()[0]
+                if len(g_ar) > 6:
+                    g_ar = f"{w_prob:.0%}"
+                self.last_word_guess = (now, f"{w_prob:.0%}", g_ar)
                 if w_pred != "IDLE" and w_prob >= self.cfg.WORD_THRESH:
-                    if not (self.sentence_words and self.sentence_words[-1] == w_pred and now - self.sentence_last_time < 1.2):
+                    if not (self.sentence_words and self.sentence_words[-1] == w_pred and now - self.sentence_last_time < 0.9):
                         self.sentence_words.append(w_pred)
                         self.sentence_words_ar.append(translate_en_to_ar(w_pred))
                         self.sentence_last_time = now
@@ -390,22 +417,28 @@ class Brain:
                         self.sentence_text = format_sentence(self.sentence_words)
                         self._typed.append(f" {w_pred}")
 
-        # Natural pause auto-speak (1.8s pause after signing sentence)
+        # Natural pause auto-speak (1.2s pause after signing sentence)
         if self.sentence_words and not self.sentence_spoken and not self.word_seg.active:
-            if now - self.sentence_last_time >= 1.8:
+            if now - self.sentence_last_time >= 1.2:
                 self.pending_say = True
                 self.sentence_spoken = True
 
-        self.last_guess_ar = ""
         if self.word_seg.active:
-            top2 = f"SIGNING WORD... {now - self.word_seg.start:.1f}s"
+            dur = f"{now - self.word_seg.start:.1f}s"
+            top2 = f"SIGNING WORD... {dur}"
             self.last_hint_ar = f"تسجيل {now - self.word_seg.start:.1f}"
-        elif self.sentence_words:
-            top2 = " -> ".join(self.sentence_words[-3:])
-            self.last_hint_ar = " ".join(self.sentence_words_ar[-2:]) if self.sentence_words_ar else (self.word_top3_ar or "")
+            self.last_guess = dur
+            self.last_guess_ar = f"{now - self.word_seg.start:.1f}"
         else:
-            top2 = self.word_top3 or "Sign successive words..."
-            self.last_hint_ar = self.word_top3_ar or "إشارة جملة"
+            gt, gen, gar = self.last_word_guess
+            self.last_guess = gen if now - gt < 3.0 else ""
+            self.last_guess_ar = gar if now - gt < 3.0 else ""
+            if self.sentence_words:
+                top2 = " -> ".join(self.sentence_words[-3:])
+                self.last_hint_ar = " ".join(self.sentence_words_ar[-2:]) if self.sentence_words_ar else (self.word_top3_ar or "")
+            else:
+                top2 = self.word_top3 or "Sign successive words..."
+                self.last_hint_ar = self.word_top3_ar or "إشارة جملة"
         return pts, top2
 
     def _word_step(self, rgb_unflipped, now):
@@ -423,6 +456,9 @@ class Brain:
                 self.word_top3 = "   ".join(f"{translate_arsl_word(w, 'en')[:10]} {p:.0%}" for w, p in w_ranked[:3])
                 self.word_top3_ar = "  ".join(f"{translate_arsl_word(w, 'ar')} {p:.0%}" for w, p in w_ranked[:2])
                 self.motion_info = (now, self.word_top3)
+                w_ar = translate_arsl_word(w_id, "ar")
+                g_ar = w_ar.split()[0] if len(w_ar.split()[0]) <= 6 else f"{w_prob:.0%}"
+                self.last_word_guess = (now, f"{w_prob:.0%}", g_ar)
                 if w_prob >= 0.25:
                     self._arsl_last_word_id = w_id
                     shown = translate_arsl_word(w_id, self.out_lang)
@@ -438,15 +474,24 @@ class Brain:
                 self.word_top3 = "   ".join(f"{w} {p:.0%}" for w, p in w_ranked[:3])
                 self.word_top3_ar = "  ".join(f"{translate_en_to_ar(str(w))} {p:.0%}" for w, p in w_ranked[:2])
                 self.motion_info = (now, self.word_top3)
+                g_ar = translate_en_to_ar(str(w_pred)).split()[0]
+                if len(g_ar) > 6:
+                    g_ar = f"{w_prob:.0%}"
+                self.last_word_guess = (now, f"{w_prob:.0%}", g_ar)
                 if w_pred != "IDLE" and w_prob >= self.cfg.WORD_THRESH:
                     self.text = w_pred
                     self.last_typed = (now, w_pred, "word")
                     self._typed.append(w_pred)
-        self.last_guess_ar = ""
         if self.word_seg.active:
-            top2 = f"SIGNING... {now - self.word_seg.start:.1f}s"
+            dur = f"{now - self.word_seg.start:.1f}s"
+            top2 = f"SIGNING... {dur}"
             self.last_hint_ar = f"تسجيل {now - self.word_seg.start:.1f}"
+            self.last_guess = dur
+            self.last_guess_ar = f"{now - self.word_seg.start:.1f}"
         else:
+            gt, gen, gar = self.last_word_guess
+            self.last_guess = gen if now - gt < 3.0 else ""
+            self.last_guess_ar = gar if now - gt < 3.0 else ""
             top2 = self.word_top3 or "Sign a word"
             self.last_hint_ar = self.word_top3_ar or "إشارة كلمة"
         return pts, top2
@@ -462,12 +507,13 @@ class Brain:
         return str(raw_cls)
 
     # ---------------- static letters ----------------
-    def _alpha_step_inspect(self, rgb_flipped, now):
+    def _alpha_step_inspect(self, rgb_flipped, now, lm=None):
         c = self.cfg
         mdl = self._active_alpha_model()
-        lm = self.alpha_detect(rgb_flipped)
+        if lm is None and self.sign_lang != "arsl":
+            lm = self.alpha_detect(rgb_flipped)
         letter, top2 = None, ""
-        self.last_hint_ar, self.last_guess_ar = "", ""
+        self.last_hint_ar, self.last_guess, self.last_guess_ar = "", "", ""
         if lm and mdl is not None:
             probs = mdl.predict_proba([normalize(lm).flatten()])[0]
             order = probs.argsort()[::-1]
@@ -482,18 +528,21 @@ class Brain:
             arb = translate_arsl_letter(mdl.classes_[b], "ar") if self.sign_lang == "arsl" else str(mdl.classes_[b])
             top2 = f"{la} {probs[a]:.0%}   {lb} {probs[b]:.0%}"
             self.last_hint_ar = f"{ara} {probs[a]:.0%}  {arb} {probs[b]:.0%}"
+            if probs[a] >= c.PREVIEW_CONF:
+                self.last_guess = self._fmt_letter(mdl.classes_[a])
+                self.last_guess_ar = ara
             if probs[a] >= c.MIN_CONF:
                 letter = self._fmt_letter(mdl.classes_[a])
-                self.last_guess_ar = ara
         return letter, top2
 
     # ---------------- static letters ----------------
-    def _alpha_step(self, rgb_flipped, now):
+    def _alpha_step(self, rgb_flipped, now, lm=None):
         c = self.cfg
         mdl = self._active_alpha_model()
-        lm = self.alpha_detect(rgb_flipped)
+        if lm is None and self.sign_lang != "arsl":
+            lm = self.alpha_detect(rgb_flipped)
         letter, top2 = None, ""
-        self.last_hint_ar, self.last_guess_ar = "", ""
+        self.last_hint_ar, self.last_guess, self.last_guess_ar = "", "", ""
         if lm and mdl is not None:
             self.last_seen = now
             probs = mdl.predict_proba([normalize(lm).flatten()])[0]
@@ -509,9 +558,11 @@ class Brain:
             arb = translate_arsl_letter(mdl.classes_[b], "ar") if self.sign_lang == "arsl" else str(mdl.classes_[b])
             top2 = f"{la} {probs[a]:.0%}   {lb} {probs[b]:.0%}"
             self.last_hint_ar = f"{ara} {probs[a]:.0%}  {arb} {probs[b]:.0%}"
+            if probs[a] >= c.PREVIEW_CONF:
+                self.last_guess = self._fmt_letter(mdl.classes_[a])
+                self.last_guess_ar = ara
             if probs[a] >= c.MIN_CONF:
                 letter = self._fmt_letter(mdl.classes_[a])
-                self.last_guess_ar = ara
         elif now - self.last_seen > c.UNLOCK_AFTER:      # hand really left, not a flicker
             self.locked = None
 

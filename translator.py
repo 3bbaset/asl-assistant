@@ -191,6 +191,7 @@ for _en, _ar in EN_TO_AR_WORDS.items():
 _LOCK = threading.Lock()
 _CACHE = None
 _FONT_MAP = None
+_FONT_MAP_MTIME = 0.0
 _ARSL_WORD_MAP = None
 
 
@@ -349,13 +350,15 @@ def shape_arabic(text):
 
 
 def _load_font_map():
-    global _FONT_MAP
-    if _FONT_MAP is None:
-        if os.path.exists(FONT_MAP_FILE):
+    global _FONT_MAP, _FONT_MAP_MTIME
+    if os.path.exists(FONT_MAP_FILE):
+        mtime = os.path.getmtime(FONT_MAP_FILE)
+        if _FONT_MAP is None or mtime != _FONT_MAP_MTIME:
             with open(FONT_MAP_FILE, encoding="utf-8") as f:
                 _FONT_MAP = json.load(f)
-        else:
-            _FONT_MAP = {}
+            _FONT_MAP_MTIME = mtime
+    elif _FONT_MAP is None:
+        _FONT_MAP = {}
     return _FONT_MAP
 
 

@@ -33,8 +33,8 @@ except ImportError:  # installed by deploy_pi.py
 NET_PORT = 9000
 UART_DEV = "/dev/serial0"
 UART_BAUD = 115200
-CAM_CMD = ["rpicam-vid", "-t", "0", "-n", "--codec", "mjpeg", "--width", "640", "--height", "480",
-           "--framerate", "30", "--quality", "65", "--flush", "-o", "-"]
+CAM_CMD = ["rpicam-vid", "-t", "0", "-n", "--codec", "mjpeg", "--width", "480", "--height", "360",
+           "--framerate", "30", "--quality", "55", "--flush", "-o", "-"]
 
 
 def log(tag, msg):
@@ -276,7 +276,7 @@ class Esp:
                     self.ser.write(b"PING\n")
                 view = self.view()
                 diff = {k: v for k, v in view.items() if self.sent.get(k) != v}
-                if diff and now - self.last_tx >= 0.08:
+                if diff and now - self.last_tx >= 0.04:
                     self.write(diff)
                     self.sent.update(diff)
                     self.last_tx = self.last_hb = now

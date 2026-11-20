@@ -49,16 +49,18 @@ def _draw_gui_banner(view, b, text, translated):
     has_ar = any("\u0600" <= ch <= "\u06ff" for ch in (translated or text or ""))
     if has_ar:
         from PIL import Image, ImageDraw
-        pil_img = Image.fromarray(cv2.cvtColor(view, cv2.COLOR_BGR2RGB))
-        draw = ImageDraw.Draw(pil_img)
-        draw.rectangle([(0, 0), (w, 66)], fill=(15, 23, 42))
+        # Convert only the 66px top banner strip instead of the entire frame (~8x faster)
+        strip_h = min(66, h)
+        pil_strip = Image.new("RGB", (w, strip_h), (15, 23, 42))
+        draw = ImageDraw.Draw(pil_strip)
         font = _get_ar_font()
         draw.text((12, 8), badge, font=font, fill=(45, 212, 191))
         shown_ar = translator.shape_arabic((translated or text)[-36:])
         draw.text((12, 34), shown_ar, font=font, fill=(255, 255, 255))
         if translated and text and translated != text and not any("\u0600" <= ch <= "\u06ff" for ch in text):
-            draw.text((w - 260, 8), text[-22:], font=font, fill=(245, 158, 11))
-        return cv2.cvtColor(np.asarray(pil_img), cv2.COLOR_RGB2BGR)
+            draw.text((max(12, w - 260), 8), text[-22:], font=font, fill=(245, 158, 11))
+        view[:strip_h, :] = cv2.cvtColor(np.asarray(pil_strip), cv2.COLOR_RGB2BGR)
+        return view
     cv2.rectangle(view, (0, 0), (w, 46), (15, 23, 42), -1)
     cv2.putText(view, f"[{badge}]  {text[-32:]}", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.72, (0, 255, 255), 2)
@@ -175,14 +177,17 @@ def handle(b, hdr, jpg, last, gui, hub=None):
             last["hand"] = 1 if res.get("hand") else 0
             last["num_hands"] = len(res.get("hands") or ([res["hand"]] if res.get("hand") else []))
             last["ms"] = float(res.get("ms") or 0.0)
-            last["guess"] = "" if b.mode in ("words", "sentences") else (res.get("letter") or "")
+            last["guess"] = str(res.get("guess") or res.get("letter") or "")
             last["hint"] = str(res.get("top2") or res.get("motion") or "")[:39]
+            last["hint_ar"] = res.get("hint_ar") or ""
+            last["guess_ar"] = res.get("guess_ar") or ""
             top3 = res.get("top3") or top3
             if res.get("typed") and b.mode in ("words", "alphabets"):
                 speak = res["typed"]
             if res.get("say"):
                 speak = res["say"]
-            if gui or hub:
+            want_vid = bool(hub and hub.video_clients > 0 and (time.time() - last.get("vid_t", 0.0) >= 0.08))
+            if gui or want_vid:
                 view = cv2.flip(frame, 1)
                 h, w = view.shape[:2]
                 for hand in (res.get("hands") or ([res["hand"]] if res.get("hand") else [])):
@@ -192,10 +197,11 @@ def handle(b, hdr, jpg, last, gui, hub=None):
                 text_now = current_text(b)
                 trans_now = res.get("translated_text") or ""
                 view = _draw_gui_banner(view, b, text_now, trans_now)
-                if hub:
-                    ok_enc, enc_jpg = cv2.imencode(".jpg", view, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
+                if want_vid:
+                    ok_enc, enc_jpg = cv2.imencode(".jpg", view, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
                     if ok_enc:
                         hub.push_frame(enc_jpg.tobytes())
+                        last["vid_t"] = time.time()
                 if gui:
                     cv2.imshow("AI engine (debug)", view)
                     k = cv2.waitKey(1) & 0xFF
@@ -216,8 +222,8 @@ def handle(b, hdr, jpg, last, gui, hub=None):
     disp_mode = _combined_mode(b)
     ar_display = (translated or text) if b.out_lang == "ar" else ""
     ar_hex = translator.encode_esp_arabic(ar_display, max_chars=24) if ar_display else ""
-    ar_hint_hex = translator.encode_esp_arabic(res.get("hint_ar") or "", max_chars=24) if (res and b.out_lang == "ar" and res.get("hint_ar")) else ""
-    ar_guess_hex = translator.encode_esp_arabic(res.get("guess_ar") or "", max_chars=4) if (res and b.out_lang == "ar" and res.get("guess_ar")) else ""
+    ar_hint_hex = translator.encode_esp_arabic(last.get("hint_ar") or "", max_chars=24) if (b.out_lang == "ar" and last.get("hint_ar")) else ""
+    ar_guess_hex = translator.encode_esp_arabic(last.get("guess_ar") or "", max_chars=6) if (b.out_lang == "ar" and last.get("guess_ar")) else ""
     # ASCII-safe fallback for Pi state when output is Arabic
     esp_ascii = text if not any(ord(ch) >= 127 for ch in text) else ""
     if hub:

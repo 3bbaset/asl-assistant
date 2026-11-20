@@ -30,6 +30,7 @@ class TelemetryHub:
         self.frame_cond = threading.Condition()
         self.latest_jpeg = None
         self.frame_seq = 0
+        self.video_clients = 0
         self.cmd_queue = queue.Queue()
         self.logs = deque(maxlen=40)
         self.state = {
@@ -207,6 +208,8 @@ def _make_handler(hub):
             self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
+            with hub.lock:
+                hub.video_clients += 1
             try:
                 last_seq = -1
                 while True:
@@ -223,6 +226,9 @@ def _make_handler(hub):
                         self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
                 pass
+            finally:
+                with hub.lock:
+                    hub.video_clients = max(0, hub.video_clients - 1)
 
     return DashboardHandler
 

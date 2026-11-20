@@ -222,16 +222,19 @@ except Exception:
 def _raster_ar_row(font_bytes, g_list, ng, r, scale, fg_hi, fg_lo, bg_hi, bg_lo, dst):
     di = 0
     for gi in range(ng):
-        base = g_list[gi] * 33
+        base = g_list[gi] * 61
         adv = font_bytes[base]
-        off = base + 1 + r * 2
+        off = base + 1 + r * 3
         b0 = font_bytes[off]
         b1 = font_bytes[off + 1]
+        b2 = font_bytes[off + 2]
         for col in range(adv):
             if col < 8:
                 bit = b0 & (0x80 >> col)
-            else:
+            elif col < 16:
                 bit = b1 & (0x80 >> (col - 8))
+            else:
+                bit = b2 & (0x80 >> (col - 16))
             if bit:
                 hi = fg_hi; lo = fg_lo
             else:
@@ -242,11 +245,11 @@ def _raster_ar_row(font_bytes, g_list, ng, r, scale, fg_hi, fg_lo, bg_hi, bg_lo,
 
 
 def draw_ar_text(x, y, w, h, hex_str, fg, bg, scale=1, align="r"):
-    """Render up to 2 lines of proportional 16px Arabic glyphs from hex indices ('FF' = newline)."""
+    """Render up to 2 lines of proportional 20px Bold Arabic glyphs from hex indices ('FF' = newline)."""
     fill(x, y, w, h, bg)
     if not _AR_FONT or not hex_str:
         return
-    max_g = len(_AR_FONT) // 33
+    max_g = len(_AR_FONT) // 61
     if max_g <= 0:
         return
     raw_lines = []
@@ -261,10 +264,14 @@ def draw_ar_text(x, y, w, h, hex_str, fg, bg, scale=1, align="r"):
     if not raw_lines:
         return
 
-    # Auto-upscale single short word/letter when box is tall enough
-    if len(raw_lines) == 1 and h >= 36 and scale == 1:
-        w1 = sum(_AR_FONT[g * 33] for g in raw_lines[0])
-        if w1 * 2 <= w - 10:
+    # Auto-upscale 2x (40px tall) for short centered GUESS card or short single word when it fits cleanly
+    if scale > 1:
+        w0 = sum(_AR_FONT[g * 61] for g in raw_lines[0])
+        if w0 * scale > w - 8 or len(raw_lines) > 1 or 20 * scale > h:
+            scale = 1
+    elif len(raw_lines) == 1 and h >= 50 and align == "c":
+        w0 = sum(_AR_FONT[g * 61] for g in raw_lines[0])
+        if w0 * 2 <= w - 8:
             scale = 2
 
     max_lw = (w - 8) // scale
@@ -272,9 +279,8 @@ def draw_ar_text(x, y, w, h, hex_str, fg, bg, scale=1, align="r"):
     for gs in raw_lines:
         trimmed = []
         lw = 0
-        # Visual order is L->R; for RTL keep suffix (leftmost visual fits) or prefix safely within box
         for g in gs:
-            gw = _AR_FONT[g * 33]
+            gw = _AR_FONT[g * 61]
             if lw + gw > max_lw:
                 break
             trimmed.append(g)
@@ -286,7 +292,7 @@ def draw_ar_text(x, y, w, h, hex_str, fg, bg, scale=1, align="r"):
 
     fg_hi, fg_lo = fg >> 8, fg & 0xFF
     bg_hi, bg_lo = bg >> 8, bg & 0xFF
-    lh = 16 * scale
+    lh = 20 * scale
     gap = 4 if len(lines) > 1 else 0
     total_h = len(lines) * lh + gap
     cy = y + max(0, (h - total_h) // 2)
@@ -298,7 +304,7 @@ def draw_ar_text(x, y, w, h, hex_str, fg, bg, scale=1, align="r"):
             gx = x + max(4, w - pw - 6)
         row_buf = bytearray(pw * 2)
         window(gx, cy, pw, lh)
-        for r in range(16):
+        for r in range(20):
             _raster_ar_row(_AR_FONT, gs, len(gs), r, scale, fg_hi, fg_lo, bg_hi, bg_lo, row_buf)
             for _ in range(scale):
                 spi.write(row_buf)
