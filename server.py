@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 if os.name == "posix":                      # Linux only (breaks Windows)
@@ -45,24 +46,127 @@ def _one_thread(m):
                 _one_thread(sub)
 
 
+class FastHGBClassifier:
+    """Bit-exact vectorized NumPy walker for HistGradientBoostingClassifier Pipelines."""
+
+    def __init__(self, pipeline_or_model):
+        self._orig = pipeline_or_model
+        steps = list(getattr(pipeline_or_model, "named_steps", {}).values())
+        if steps:
+            self._pre_steps = steps[:-1]
+            hgb = steps[-1]
+        else:
+            self._pre_steps = []
+            hgb = pipeline_or_model
+        self.classes_ = hgb.classes_
+        preds = hgb._predictors
+        self._n_iter = len(preds)
+        self._n_cls = len(preds[0])
+        T = self._n_iter * self._n_cls
+        max_nodes = max(len(preds[i][k].nodes) for i in range(self._n_iter) for k in range(self._n_cls))
+        self._feat = np.zeros((T, max_nodes), dtype=np.int32)
+        self._thresh = np.zeros((T, max_nodes), dtype=np.float64)
+        self._left = np.zeros((T, max_nodes), dtype=np.int32)
+        self._right = np.zeros((T, max_nodes), dtype=np.int32)
+        self._val = np.zeros((T, max_nodes), dtype=np.float64)
+        self._is_leaf = np.ones((T, max_nodes), dtype=bool)
+        self._miss_left = np.zeros((T, max_nodes), dtype=bool)
+        for i in range(self._n_iter):
+            for k in range(self._n_cls):
+                t = i * self._n_cls + k
+                nd = preds[i][k].nodes
+                L = len(nd)
+                self._feat[t, :L] = nd["feature_idx"]
+                self._thresh[t, :L] = nd["num_threshold"]
+                self._left[t, :L] = nd["left"]
+                self._right[t, :L] = nd["right"]
+                self._val[t, :L] = nd["value"]
+                self._is_leaf[t, :L] = nd["is_leaf"].astype(bool)
+                self._miss_left[t, :L] = nd["missing_go_to_left"].astype(bool)
+        self._t_arange = np.arange(T, dtype=np.int32)
+        self._base = np.asarray(hgb._baseline_prediction, dtype=np.float64).ravel()
+
+    def predict_proba(self, X):
+        X_arr = np.asarray(X)
+        if len(X_arr) != 1:
+            return self._orig.predict_proba(X)
+        Xf = X_arr
+        for st in self._pre_steps:
+            Xf = st.transform(Xf)
+        xf = np.asarray(Xf[0], dtype=np.float64)
+        T = len(self._t_arange)
+        idx = np.zeros(T, dtype=np.int32)
+        ta = self._t_arange
+        while True:
+            leaf = self._is_leaf[ta, idx]
+            if leaf.all():
+                break
+            fv = xf[self._feat[ta, idx]]
+            nan_mask = np.isnan(fv)
+            go_left = np.where(nan_mask, self._miss_left[ta, idx], fv <= self._thresh[ta, idx])
+            nxt = np.where(go_left, self._left[ta, idx], self._right[ta, idx])
+            idx = np.where(leaf, idx, nxt)
+        raw = self._val[ta, idx].reshape(self._n_iter, self._n_cls).sum(axis=0) + self._base
+        if self._n_cls == 1:
+            p1 = 1.0 / (1.0 + np.exp(-raw))
+            return np.column_stack([1.0 - p1, p1])
+        raw -= raw.max()
+        e = np.exp(raw)
+        return (e / e.sum())[None, :]
+
+
+def _wrap_fast_hgb(mdl):
+    try:
+        from sklearn.ensemble import HistGradientBoostingClassifier
+        last = list(getattr(mdl, "named_steps", {}).values())[-1] if hasattr(mdl, "named_steps") else mdl
+        if not isinstance(last, HistGradientBoostingClassifier):
+            return mdl
+        fast = FastHGBClassifier(mdl)
+        n_in = getattr(mdl, "n_features_in_", 63)
+        test_x = np.random.default_rng(0).normal(size=(1, n_in)).astype(np.float32)
+        if float(np.max(np.abs(fast.predict_proba(test_x) - mdl.predict_proba(test_x)))) < 1e-6:
+            return fast
+    except Exception:
+        pass
+    return mdl
+
+
 def build_real_brain():
     import joblib
     import mediapipe as mp
     from mediapipe.tasks import python as mp_python
     from mediapipe.tasks.python import vision
-    from common import make_detector, detect
 
-    alpha_model = joblib.load("asl_model_v2.joblib")
+    alpha_model = _wrap_fast_hgb(joblib.load("asl_model_v2.joblib"))
     motion_model = joblib.load("motion_model2.joblib")
     m30_path = "word_model_curated_30.joblib" if os.path.exists("word_model_curated_30.joblib") else "word_model_curated_85.joblib"
     m_full_path = "word_model_full_2021.joblib"
     word_model_30 = joblib.load(m30_path) if os.path.exists(m30_path) else None
     word_model_full = joblib.load(m_full_path) if os.path.exists(m_full_path) else None
-    arsl_alpha_model = joblib.load("arsl_alpha_model.joblib") if os.path.exists("arsl_alpha_model.joblib") else None
+    arsl_alpha_model = _wrap_fast_hgb(joblib.load("arsl_alpha_model.joblib")) if os.path.exists("arsl_alpha_model.joblib") else None
     arsl_word_model = joblib.load("arsl_word_model_30.joblib") if os.path.exists("arsl_word_model_30.joblib") else None
     for mdl in (alpha_model, motion_model, word_model_30, word_model_full, arsl_alpha_model, arsl_word_model):
         _one_thread(mdl)
-    alpha_det = make_detector(min_conf=0.6)            # IMAGE mode, 1 hand, as in app.py
+
+    # Use VIDEO tracking mode for both detectors so MediaPipe tracks the hand ROI across frames (~3x faster)
+    alpha_opts = vision.HandLandmarkerOptions(
+        base_options=mp_python.BaseOptions(model_asset_path="hand_landmarker.task"),
+        running_mode=vision.RunningMode.VIDEO,
+        num_hands=1,
+        min_hand_detection_confidence=0.55,
+        min_hand_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
+    alpha_lmk = vision.HandLandmarker.create_from_options(alpha_opts)
+    alpha_last = [0]
+
+    def alpha_detect(rgb):
+        ts_ms = max(int(time.time() * 1000), alpha_last[0] + 1)
+        alpha_last[0] = ts_ms
+        res = alpha_lmk.detect_for_video(
+            mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), ts_ms)
+        return res.hand_landmarks[0] if res.hand_landmarks else None
+
     opts = vision.HandLandmarkerOptions(
         base_options=mp_python.BaseOptions(model_asset_path="hand_landmarker.task"),
         running_mode=vision.RunningMode.VIDEO, num_hands=2)
@@ -76,7 +180,7 @@ def build_real_brain():
             mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), ts_ms)
 
     return Brain(alpha_model, motion_model,
-                 lambda rgb: detect(alpha_det, rgb), motion_detect,
+                 alpha_detect, motion_detect,
                  word_model=word_model_30, word_model_full=word_model_full,
                  arsl_alpha_model=arsl_alpha_model, arsl_word_model=arsl_word_model)
 

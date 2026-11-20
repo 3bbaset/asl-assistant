@@ -27,7 +27,11 @@ import micropython
 micropython.kbd_intr(-1)  # never let a stray 0x03 byte kill the firmware
 
 from machine import Pin, SPI, SoftSPI, UART
-import time, struct, framebuf, sys, select
+import os, gc, machine, time, struct, framebuf, sys, select
+try:
+    import ubinascii as _b64
+except ImportError:
+    import binascii as _b64
 
 # ------------------------------------------------------------------ LEDs
 bl = Pin(21, Pin.OUT, value=1)
@@ -219,8 +223,8 @@ except Exception:
 
 
 @micropython.native
-def _raster_ar_row(font_bytes, g_list, ng, r, scale, fg_hi, fg_lo, bg_hi, bg_lo, dst):
-    di = 0
+def _raster_ar_row(font_bytes, g_list, ng, r, scale, fg_hi, fg_lo, bg_hi, bg_lo, dst, start_byte):
+    di = start_byte
     for gi in range(ng):
         base = g_list[gi] * 61
         adv = font_bytes[base]
@@ -245,23 +249,28 @@ def _raster_ar_row(font_bytes, g_list, ng, r, scale, fg_hi, fg_lo, bg_hi, bg_lo,
 
 
 def draw_ar_text(x, y, w, h, hex_str, fg, bg, scale=1, align="r"):
-    """Render up to 2 lines of proportional 20px Bold Arabic glyphs from hex indices ('FF' = newline)."""
-    fill(x, y, w, h, bg)
+    """Render up to 2 lines of proportional 20px Bold Arabic glyphs without blank-flash flicker."""
     if not _AR_FONT or not hex_str:
+        fill(x, y, w, h, bg)
         return
     max_g = len(_AR_FONT) // 61
     if max_g <= 0:
+        fill(x, y, w, h, bg)
         return
     raw_lines = []
-    for seg in hex_str.split("FF"):
+    for seg in hex_str.split("/"):
         gs = []
         for i in range(0, len(seg) - 1, 2):
-            idx = int(seg[i:i + 2], 16)
+            try:
+                idx = int(seg[i:i + 2], 16)
+            except ValueError:
+                idx = 0
             gs.append(idx if idx < max_g else 0)
         if gs:
             raw_lines.append(gs)
     raw_lines = raw_lines[:2]
     if not raw_lines:
+        fill(x, y, w, h, bg)
         return
 
     # Auto-upscale 2x (40px tall) for short centered GUESS card or short single word when it fits cleanly
@@ -288,28 +297,36 @@ def draw_ar_text(x, y, w, h, hex_str, fg, bg, scale=1, align="r"):
         if trimmed:
             lines.append((trimmed, lw))
     if not lines:
+        fill(x, y, w, h, bg)
         return
 
     fg_hi, fg_lo = fg >> 8, fg & 0xFF
     bg_hi, bg_lo = bg >> 8, bg & 0xFF
+    bg_pair = struct.pack(">H", bg)
     lh = 20 * scale
     gap = 4 if len(lines) > 1 else 0
     total_h = len(lines) * lh + gap
-    cy = y + max(0, (h - total_h) // 2)
-    for gs, lw in lines:
+    top_y = y + max(0, (h - total_h) // 2)
+    if top_y > y:
+        fill(x, y, w, top_y - y, bg)
+    cy = top_y
+    for idx_ln, (gs, lw) in enumerate(lines):
         pw = lw * scale
-        if align == "c":
-            gx = x + max(2, (w - pw) // 2)
-        else:
-            gx = x + max(4, w - pw - 6)
-        row_buf = bytearray(pw * 2)
-        window(gx, cy, pw, lh)
+        pad_l = max(2, (w - pw) // 2) if align == "c" else max(4, w - pw - 6)
+        pad_l = max(0, min(w - pw, pad_l))
+        row_buf = bytearray(bg_pair * w)
+        window(x, cy, w, lh)
         for r in range(20):
-            _raster_ar_row(_AR_FONT, gs, len(gs), r, scale, fg_hi, fg_lo, bg_hi, bg_lo, row_buf)
+            _raster_ar_row(_AR_FONT, gs, len(gs), r, scale, fg_hi, fg_lo, bg_hi, bg_lo, row_buf, pad_l * 2)
             for _ in range(scale):
                 spi.write(row_buf)
         cs.value(1)
+        if idx_ln == 0 and len(lines) > 1 and gap > 0:
+            fill(x, cy + lh, w, gap, bg)
         cy += lh + gap
+    end_y = top_y + total_h
+    if end_y < y + h:
+        fill(x, end_y, w, y + h - end_y, bg)
 
 def draw_tabs(active):
     for i, (label, key) in enumerate(MODES):
@@ -391,6 +408,93 @@ def draw_all():
     fill(0, 0, 320, 240, BG)
     draw_tabs(st["m"]); draw_cam(); draw_hand(); draw_guess(); draw_text(); draw_hint(); draw_lang_toggles(); draw_buttons()
 
+# ------------------------------------------------------------------ OTA over UART / USB
+ota = {"f": None, "name": "", "tmp": "", "want": 0, "got": 0, "crc": 0xFFFFFFFF}
+
+def _crc32_update(crc, data):
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            if crc & 1:
+                crc = (crc >> 1) ^ 0xEDB88320
+            else:
+                crc >>= 1
+    return crc
+
+def _ota_abort():
+    if ota["f"] is not None:
+        try:
+            ota["f"].close()
+        except Exception:
+            pass
+        ota["f"] = None
+    if ota["tmp"]:
+        try:
+            os.remove(ota["tmp"])
+        except Exception:
+            pass
+    ota["name"] = ""; ota["tmp"] = ""; ota["want"] = 0; ota["got"] = 0; ota["crc"] = 0xFFFFFFFF
+
+def _handle_ota(line):
+    if line.startswith("OTA:START:"):
+        parts = line.split(":", 3)
+        if len(parts) < 4:
+            out("OTA:ERR:ARGS"); return
+        fname = parts[2].strip()
+        if not fname or "/" in fname or "\\" in fname or ".." in fname:
+            out("OTA:ERR:NAME"); return
+        try:
+            want = int(parts[3])
+        except ValueError:
+            out("OTA:ERR:SIZE"); return
+        _ota_abort()
+        gc.collect()
+        tmp = fname + ".tmp"
+        ota["f"] = open(tmp, "wb")
+        ota["name"] = fname; ota["tmp"] = tmp; ota["want"] = want; ota["got"] = 0; ota["crc"] = 0xFFFFFFFF
+        text(2, 98, 316, 64, "OTA UPDATE\n" + fname, YELLOW, DARK, 2)
+        out("OTA:READY")
+    elif line.startswith("OTA:DATA:"):
+        parts = line.split(":", 3)
+        if len(parts) < 4 or ota["f"] is None:
+            out("OTA:ERR:NOSTART"); return
+        raw = _b64.a2b_base64(parts[3].strip())
+        ota["f"].write(raw)
+        ota["got"] += len(raw)
+        ota["crc"] = _crc32_update(ota["crc"], raw)
+        out("OTA:ACK:" + parts[2])
+    elif line.startswith("OTA:END:"):
+        if ota["f"] is None:
+            out("OTA:ERR:NOSTART"); return
+        try:
+            want_crc = int(line.split(":", 2)[2], 16) & 0xFFFFFFFF
+        except ValueError:
+            _ota_abort(); draw_all(); out("OTA:ERR:CRC"); return
+        fname, tmp, want, got = ota["name"], ota["tmp"], ota["want"], ota["got"]
+        final_crc = (ota["crc"] ^ 0xFFFFFFFF) & 0xFFFFFFFF
+        try:
+            ota["f"].close()
+        except Exception:
+            pass
+        ota["f"] = None
+        if got == want and final_crc == want_crc:
+            try:
+                os.remove(fname)
+            except OSError:
+                pass
+            os.rename(tmp, fname)
+            ota["name"] = ""; ota["tmp"] = ""; ota["want"] = 0; ota["got"] = 0; ota["crc"] = 0xFFFFFFFF
+            text(2, 98, 316, 64, "OTA OK\n" + fname, GREEN, DARK, 2)
+            out("OTA:OK")
+        else:
+            _ota_abort()
+            draw_all()
+            out("OTA:ERR:VERIFY:%d/%d:%08X" % (got, want, final_crc))
+    elif line == "OTA:ABORT":
+        _ota_abort(); draw_all(); out("OTA:ABORTED")
+    elif line == "OTA:REBOOT":
+        _ota_abort(); out("OTA:BYE"); time.sleep_ms(150); machine.reset()
+
 # ------------------------------------------------------------------ Message handling
 def handle_line(line):
     global last_rx
@@ -400,6 +504,14 @@ def handle_line(line):
     last_rx = time.ticks_ms()
     if line == "PING":
         out("PONG"); return
+    if line == "INFO":
+        gc.collect()
+        out("INFO:ver=11,font=%d,free=%d" % (len(_AR_FONT) if _AR_FONT else 0, gc.mem_free()))
+        return
+    if line.startswith("OTA:"):
+        _handle_ota(line); return
+    if ota["f"] is not None:
+        return
     if line == "REPL":  # maintenance: hand the port back to the REPL for flashing
         micropython.kbd_intr(3)
         raise SystemExit
@@ -508,6 +620,7 @@ pressed_since = None
 press_handled = False
 last_touch = 0
 last_link_check = 0
+last_gc = 0
 
 while True:
     now = time.ticks_ms()
@@ -519,8 +632,14 @@ while True:
             break
         if b == b"\n" or b == b"\r":
             if rx_usb:
-                handle_line(rx_usb.decode("utf-8", "ignore")); rx_usb = bytearray()
-        elif len(rx_usb) < 512:
+                try:
+                    handle_line(rx_usb.decode("utf-8", "ignore"))
+                except SystemExit:
+                    raise
+                except Exception as e:
+                    out("ERR:" + str(e))
+                rx_usb = bytearray()
+        elif len(rx_usb) < 768:
             rx_usb.extend(b)
 
     # --- UART from Raspberry Pi (same protocol)
@@ -529,32 +648,44 @@ while True:
         for c in uart.read(n):
             if c in (10, 13):
                 if rx_uart:
-                    handle_line(rx_uart.decode("utf-8", "ignore")); rx_uart = bytearray()
-            elif len(rx_uart) < 512:
+                    try:
+                        handle_line(rx_uart.decode("utf-8", "ignore"))
+                    except SystemExit:
+                        raise
+                    except Exception as e:
+                        out("ERR:" + str(e))
+                    rx_uart = bytearray()
+            elif len(rx_uart) < 768:
                 rx_uart.append(c)
 
-    # --- Touch: edge triggered tap, 3 s hold on text area = recalibrate
-    if time.ticks_diff(now, last_touch) >= 25:
-        last_touch = now
-        r = raw_touch()
-        if r:
-            x, y = to_screen(r)
-            if pressed_since is None:
-                pressed_since = now; press_handled = False
-                out("TOUCH:%d,%d" % (x, y))
-                if not (98 <= y < 160 or (160 <= y < 196 and x < 204)):
-                    on_tap(x, y); press_handled = True
-            elif not press_handled and time.ticks_diff(now, pressed_since) > 3000:
-                press_handled = True
-                calibrate(); draw_all()
-        else:
-            pressed_since = None
+    if ota["f"] is None:
+        # --- Touch: edge triggered tap, 3 s hold on text area = recalibrate
+        if time.ticks_diff(now, last_touch) >= 25:
+            last_touch = now
+            r = raw_touch()
+            if r:
+                x, y = to_screen(r)
+                if pressed_since is None:
+                    pressed_since = now; press_handled = False
+                    out("TOUCH:%d,%d" % (x, y))
+                    if not (98 <= y < 160 or (160 <= y < 196 and x < 204)):
+                        on_tap(x, y); press_handled = True
+                elif not press_handled and time.ticks_diff(now, pressed_since) > 3000:
+                    press_handled = True
+                    calibrate(); draw_all()
+            else:
+                pressed_since = None
 
-    # --- Link watchdog: no message from laptop for 3 s => offline
-    if time.ticks_diff(now, last_link_check) > 500:
-        last_link_check = now
-        alive = time.ticks_diff(now, last_rx) < 3000 and last_rx != 0
-        if alive != st["link"]:
-            st["link"] = alive; draw_cam(); draw_hand()
+        # --- Link watchdog: no message from laptop for 3 s => offline
+        if time.ticks_diff(now, last_link_check) > 500:
+            last_link_check = now
+            alive = time.ticks_diff(now, last_rx) < 3000 and last_rx != 0
+            if alive != st["link"]:
+                st["link"] = alive; draw_cam(); draw_hand()
+
+        # --- Periodic GC to prevent fragmentation on long runs
+        if time.ticks_diff(now, last_gc) > 15000:
+            last_gc = now
+            gc.collect()
 
     time.sleep_ms(2)

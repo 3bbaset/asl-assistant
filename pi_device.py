@@ -69,6 +69,7 @@ class State:
         self.ar_guess_hex = ""     # pre-shaped Arabic guess indices for ESP32 guess box
         self.speak_text = ""       # full UTF-8 text (including Arabic) for Speech
         self.vocab_mode = "30"
+        self.frame_event = threading.Event()
 
     def cam_ok(self):
         return time.time() - self.frame_ts < 1.5
@@ -102,6 +103,7 @@ def camera_thread(st):
                     del buf[:b + 2]
                     with st.lock:
                         st.frame, st.frame_ts = frame, time.time()
+                    st.frame_event.set()
         except Exception as e:
             log("Camera", f"error: {e}; restarting in 2 s")
         finally:
@@ -158,7 +160,7 @@ class Esp:
         self.ser = None
         self.buf = b""
         self.sent = {}
-        self.last_tx = self.last_hb = self.last_ping = 0.0
+        self.last_tx = self.last_hb = self.last_ping = self.last_cosmetic_tx = 0.0
         self.esp_alive = False
         threading.Thread(target=self.run, daemon=True).start()
 
@@ -184,10 +186,12 @@ class Esp:
             self.st.text_gate = self.st.seq + 1
             if c == "clear":
                 self.st.text = ""
+                self.st.guess = ""
                 self.st.ar_hex = ""
                 self.st.ar_hint_hex = ""
                 self.st.ar_guess_hex = ""
                 self.st.speak_text = ""
+        self.st.frame_event.set()
 
     def on_line(self, line):
         st = self.st
@@ -199,8 +203,12 @@ class Esp:
                 with st.lock:
                     st.mode = m
                     st.hint = ""
+                    st.guess = ""
+                    st.ar_hint_hex = ""
+                    st.ar_guess_hex = ""
                     st.mode_gate = st.seq + 1
                     st.cmds.append("mode:" + m)
+                st.frame_event.set()
             elif cmd.startswith("SIGN:"):
                 sl = cmd[5:].strip().lower()
                 if sl in ("asl", "arsl"):
@@ -209,6 +217,7 @@ class Esp:
                         if sl == "arsl" and st.out_lang == "en":
                             st.out_lang = "ar"
                         st.text = ""
+                        st.guess = ""
                         st.ar_hex = ""
                         st.ar_hint_hex = ""
                         st.ar_guess_hex = ""
@@ -217,13 +226,18 @@ class Esp:
                         st.lang_gate = st.seq + 1
                         st.text_gate = st.seq + 1
                         st.cmds.append("sign:" + sl)
+                    st.frame_event.set()
             elif cmd.startswith("LANG:"):
                 ol = cmd[5:].strip().lower()
                 if ol in ("en", "ar"):
                     with st.lock:
                         st.out_lang = ol
+                        st.guess = ""
+                        st.ar_hint_hex = ""
+                        st.ar_guess_hex = ""
                         st.lang_gate = st.seq + 1
                         st.cmds.append("lang:" + ol)
+                    st.frame_event.set()
             elif cmd == "SPACE":
                 self.queue_cmd("space")
             elif cmd == "DEL":
@@ -276,10 +290,19 @@ class Esp:
                     self.ser.write(b"PING\n")
                 view = self.view()
                 diff = {k: v for k, v in view.items() if self.sent.get(k) != v}
-                if diff and now - self.last_tx >= 0.04:
-                    self.write(diff)
-                    self.sent.update(diff)
-                    self.last_tx = self.last_hb = now
+                if diff:
+                    urgent = any(k in ("m", "l", "o", "t", "u", "h", "c", "a") for k in diff)
+                    edge = any(bool(self.sent.get(k)) != bool(diff[k]) for k in ("i", "ia", "g", "ga") if k in diff)
+                    if urgent or edge:
+                        ready = (now - self.last_tx >= 0.03)
+                    else:
+                        ready = (now - self.last_tx >= 0.03 and now - self.last_cosmetic_tx >= 0.14)
+                    if ready:
+                        self.write(diff)
+                        self.sent.update(diff)
+                        self.last_tx = self.last_hb = now
+                        if any(k in ("i", "ia", "g", "ga") for k in diff):
+                            self.last_cosmetic_tx = now
                 elif now - self.last_hb > 1.0:
                     self.write({"c": view["c"]})
                     self.last_hb = now
@@ -327,6 +350,10 @@ def serve_ai(st, speech, conn):
                 if new:
                     last_ts = ts
                 waiting, sent_at = True, now
+            else:
+                st.frame_event.wait(timeout=0.015)
+                st.frame_event.clear()
+                continue
         readable, _, _ = select.select([conn], [], [], 0.02)
         if readable:
             n = struct.unpack(">I", recv_exact(conn, 4))[0]

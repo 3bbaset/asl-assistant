@@ -28,6 +28,7 @@ from dashboard_server import DashboardServer
 PI_PORT = 9000
 HOST_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pi_host")
 _AR_FONT = None
+_BANNER_CACHE = (None, None)
 
 
 def _get_ar_font():
@@ -44,13 +45,17 @@ def _get_ar_font():
 
 
 def _draw_gui_banner(view, b, text, translated):
+    global _BANNER_CACHE
     h, w = view.shape[:2]
     badge = f"{b.sign_lang.upper()}>{b.out_lang.upper()} | {b.mode.upper()}"
     has_ar = any("\u0600" <= ch <= "\u06ff" for ch in (translated or text or ""))
     if has_ar:
-        from PIL import Image, ImageDraw
-        # Convert only the 66px top banner strip instead of the entire frame (~8x faster)
         strip_h = min(66, h)
+        cache_key = (w, strip_h, badge, (text or "")[-36:], (translated or "")[-36:])
+        if _BANNER_CACHE[0] == cache_key:
+            view[:strip_h, :] = _BANNER_CACHE[1]
+            return view
+        from PIL import Image, ImageDraw
         pil_strip = Image.new("RGB", (w, strip_h), (15, 23, 42))
         draw = ImageDraw.Draw(pil_strip)
         font = _get_ar_font()
@@ -59,7 +64,9 @@ def _draw_gui_banner(view, b, text, translated):
         draw.text((12, 34), shown_ar, font=font, fill=(255, 255, 255))
         if translated and text and translated != text and not any("\u0600" <= ch <= "\u06ff" for ch in text):
             draw.text((max(12, w - 260), 8), text[-22:], font=font, fill=(245, 158, 11))
-        view[:strip_h, :] = cv2.cvtColor(np.asarray(pil_strip), cv2.COLOR_RGB2BGR)
+        bgr_strip = cv2.cvtColor(np.asarray(pil_strip), cv2.COLOR_RGB2BGR)
+        _BANNER_CACHE = (cache_key, bgr_strip)
+        view[:strip_h, :] = bgr_strip
         return view
     cv2.rectangle(view, (0, 0), (w, 46), (15, 23, 42), -1)
     cv2.putText(view, f"[{badge}]  {text[-32:]}", (10, 30),
@@ -221,9 +228,22 @@ def handle(b, hdr, jpg, last, gui, hub=None):
     last["text"] = text
     disp_mode = _combined_mode(b)
     ar_display = (translated or text) if b.out_lang == "ar" else ""
-    ar_hex = translator.encode_esp_arabic(ar_display, max_chars=24) if ar_display else ""
-    ar_hint_hex = translator.encode_esp_arabic(last.get("hint_ar") or "", max_chars=24) if (b.out_lang == "ar" and last.get("hint_ar")) else ""
-    ar_guess_hex = translator.encode_esp_arabic(last.get("guess_ar") or "", max_chars=6) if (b.out_lang == "ar" and last.get("guess_ar")) else ""
+    if ar_display != last.get("_ar_disp"):
+        last["_ar_disp"] = ar_display
+        last["_ar_hex"] = translator.encode_esp_arabic(ar_display, max_chars=24) if ar_display else ""
+    ar_hex = last["_ar_hex"]
+
+    hint_ar_src = (last.get("hint_ar") or "") if b.out_lang == "ar" else ""
+    if hint_ar_src != last.get("_hint_ar_src"):
+        last["_hint_ar_src"] = hint_ar_src
+        last["_ar_hint_hex"] = translator.encode_esp_arabic(hint_ar_src, max_chars=24) if hint_ar_src else ""
+    ar_hint_hex = last["_ar_hint_hex"]
+
+    guess_ar_src = (last.get("guess_ar") or "") if b.out_lang == "ar" else ""
+    if guess_ar_src != last.get("_guess_ar_src"):
+        last["_guess_ar_src"] = guess_ar_src
+        last["_ar_guess_hex"] = translator.encode_esp_arabic(guess_ar_src, max_chars=6) if guess_ar_src else ""
+    ar_guess_hex = last["_ar_guess_hex"]
     # ASCII-safe fallback for Pi state when output is Arabic
     esp_ascii = text if not any(ord(ch) >= 127 for ch in text) else ""
     if hub:

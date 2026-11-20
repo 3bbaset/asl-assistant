@@ -384,7 +384,7 @@ def _wrap_arabic_lines(text, max_chars=18):
 def encode_esp_arabic(text, max_chars=18):
     """Wrap into up to 2 logical lines, shape + BiDi each line, and encode glyphs as hex.
 
-    Glyph indices are 0x00..0xFE; 0xFF marks a line break for the ESP32 16x16 renderer.
+    Glyph indices are 0x00..0xFE; '/' marks a line break for the ESP32 20px renderer.
     """
     if not text or not str(text).strip():
         return ""
@@ -406,4 +406,4 @@ def encode_esp_arabic(text, max_chars=18):
             buf.append(f"{idx:02X}")
         if buf:
             encoded_lines.append("".join(buf))
-    return "FF".join(encoded_lines)
+    return "/".join(encoded_lines)

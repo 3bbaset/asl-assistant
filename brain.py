@@ -22,7 +22,7 @@ from phrase_common import frame_features, clip_vector
 from motion_common import fill_gaps
 from words_common import format_sentence
 from words_live import WordSegmenter, classify as classify_word
-from arsl_common import classify_arsl_word
+from arsl_common import arsl_frame_features, classify_arsl_word
 from translator import (
     format_arabic_sentence,
     translate_ar_to_en,
@@ -34,11 +34,11 @@ from translator import (
 
 class Config:
     # --- alphabet typing (tuned for responsive real-time speed) ---
-    WINDOW = 0.35         # seconds a letter must be held
-    AGREE = 0.75          # share of the window the same letter must win
-    MIN_CONF = 0.55       # ignore guesses the model is unsure about when typing
-    PREVIEW_CONF = 0.35   # minimum confidence to show live preview in GUESS box
-    UNLOCK_AFTER = 0.28   # seconds without a hand before the same letter can repeat
+    WINDOW = 0.28         # seconds a letter must be held
+    AGREE = 0.72          # share of the window the same letter must win
+    MIN_CONF = 0.52       # ignore guesses the model is unsure about when typing
+    PREVIEW_CONF = 0.30   # minimum confidence to show live preview in GUESS box
+    UNLOCK_AFTER = 0.22   # seconds without a hand before the same letter can repeat
     # --- J/Z motion ---
     MOTION_DUR = 1.5      # clip length the model was trained on
     MOTION_EVERY = 0.30   # how often to ask the model while a hand is moving
@@ -77,7 +77,7 @@ class Brain:
         self._alpha_future = None
         self._pool = ThreadPoolExecutor(max_workers=1)
         self.mode = "spelling"            # "alphabets", "spelling", "words", or "sentences"
-        self.word_seg = WordSegmenter()
+        self.word_seg = self._make_word_seg()
         self.word_top3 = ""
         self.word_top3_ar = ""
         self.last_top3 = []
@@ -85,6 +85,7 @@ class Brain:
         self.last_guess = ""
         self.last_guess_ar = ""
         self.last_word_guess = (0.0, "", "")
+        self._live_word_preview = (0.0, "", "", "", "")
         self.text = ""
         self.sentence_words = []
         self.sentence_words_ar = []
@@ -129,7 +130,47 @@ class Brain:
         self.last_guess = ""
         self.last_guess_ar = ""
         self.last_word_guess = (0.0, "", "")
-        self.word_seg = WordSegmenter(max_sign=1.6 if self.sign_lang == "arsl" else 2.0)
+        self._live_word_preview = (0.0, "", "", "", "")
+        self.word_seg = self._make_word_seg()
+
+    def _make_word_seg(self):
+        if self.sign_lang == "arsl":
+            return WordSegmenter(max_sign=1.15, still_after=0.38, still_thresh=0.018, min_still_start=0.32)
+        return WordSegmenter(max_sign=1.75)
+
+    def _preview_arsl_word(self, res, now):
+        if self.sign_lang != "arsl" or self.arsl_word_model is None or not res.hand_landmarks:
+            return
+        pt = self._live_word_preview[0]
+        if now - pt < 0.18:
+            return
+        try:
+            feat = arsl_frame_features(res)[None, :]
+            mdl = None
+            if hasattr(self.arsl_word_model, "named_estimators_"):
+                mdl = self.arsl_word_model.named_estimators_.get("mlp")
+            if mdl is None:
+                mdl = self.arsl_word_model
+            probs = mdl.predict_proba(feat)[0]
+            classes = self.arsl_word_model.classes_
+            if len(probs) != len(classes):
+                mdl = self.arsl_word_model
+                probs = mdl.predict_proba(feat)[0]
+            order = probs.argsort()[::-1]
+            en_hint = "   ".join(f"{translate_arsl_word(classes[i], 'en')[:10]} {probs[i]:.0%}" for i in order[:3])
+            ar_hint = "  ".join(f"{translate_arsl_word(classes[i], 'ar')} {probs[i]:.0%}" for i in order[:2])
+            w0_id = classes[order[0]]
+            p0 = float(probs[order[0]])
+            g_en = translate_arsl_word(w0_id, "en")[:6] if p0 >= 0.25 else f"{p0:.0%}"
+            w0_ar = translate_arsl_word(w0_id, "ar")
+            g_ar = w0_ar.split()[0] if (p0 >= 0.25 and len(w0_ar.split()[0]) <= 6) else f"{p0:.0%}"
+            self._live_word_preview = (now, en_hint, ar_hint, g_en, g_ar)
+            self.last_top3 = [
+                {"label": translate_arsl_word(classes[i], self.out_lang), "id": str(classes[i]), "prob": round(float(probs[i]), 4)}
+                for i in order[:3]
+            ]
+        except Exception:
+            pass
 
     def set_out_lang(self, lang):
         lang = str(lang).strip().lower()
@@ -198,8 +239,9 @@ class Brain:
             self.last_guess = ""
             self.last_guess_ar = ""
             self.last_word_guess = (0.0, "", "")
+            self._live_word_preview = (0.0, "", "", "", "")
             self._arsl_last_word_id = None
-            self.word_seg = WordSegmenter(max_sign=1.6 if self.sign_lang == "arsl" else 2.0)
+            self.word_seg = self._make_word_seg()
             if mode == "words":
                 self.text = ""
             elif mode == "sentences":
@@ -227,6 +269,7 @@ class Brain:
                 self.text = self.text[:-1]
         elif cmd == "clear":
             self._arsl_last_word_id = None
+            self._live_word_preview = (0.0, "", "", "", "")
             if self.mode == "sentences":
                 self.sentence_words.clear()
                 self.sentence_words_ar.clear()
@@ -424,11 +467,20 @@ class Brain:
                 self.sentence_spoken = True
 
         if self.word_seg.active:
+            if self.sign_lang == "arsl":
+                self._preview_arsl_word(res, now)
+            pt, pen, par, gen, gar = self._live_word_preview
             dur = f"{now - self.word_seg.start:.1f}s"
-            top2 = f"SIGNING WORD... {dur}"
-            self.last_hint_ar = f"تسجيل {now - self.word_seg.start:.1f}"
-            self.last_guess = dur
-            self.last_guess_ar = f"{now - self.word_seg.start:.1f}"
+            if self.sign_lang == "arsl" and pen and now - pt < 0.6:
+                top2 = pen
+                self.last_hint_ar = par
+                self.last_guess = gen
+                self.last_guess_ar = gar
+            else:
+                top2 = f"SIGNING WORD... {dur}"
+                self.last_hint_ar = f"تسجيل {now - self.word_seg.start:.1f}"
+                self.last_guess = dur
+                self.last_guess_ar = f"{now - self.word_seg.start:.1f}"
         else:
             gt, gen, gar = self.last_word_guess
             self.last_guess = gen if now - gt < 3.0 else ""
@@ -483,11 +535,20 @@ class Brain:
                     self.last_typed = (now, w_pred, "word")
                     self._typed.append(w_pred)
         if self.word_seg.active:
+            if self.sign_lang == "arsl":
+                self._preview_arsl_word(res, now)
+            pt, pen, par, gen, gar = self._live_word_preview
             dur = f"{now - self.word_seg.start:.1f}s"
-            top2 = f"SIGNING... {dur}"
-            self.last_hint_ar = f"تسجيل {now - self.word_seg.start:.1f}"
-            self.last_guess = dur
-            self.last_guess_ar = f"{now - self.word_seg.start:.1f}"
+            if self.sign_lang == "arsl" and pen and now - pt < 0.6:
+                top2 = pen
+                self.last_hint_ar = par
+                self.last_guess = gen
+                self.last_guess_ar = gar
+            else:
+                top2 = f"SIGNING... {dur}"
+                self.last_hint_ar = f"تسجيل {now - self.word_seg.start:.1f}"
+                self.last_guess = dur
+                self.last_guess_ar = f"{now - self.word_seg.start:.1f}"
         else:
             gt, gen, gar = self.last_word_guess
             self.last_guess = gen if now - gt < 3.0 else ""

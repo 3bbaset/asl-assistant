@@ -5,7 +5,7 @@ import numpy as np
 from phrase_common import frame_features, clip_vector
 from motion_common import fill_gaps
 
-GONE_AFTER = 0.22   # seconds without hands = the word is finished
+GONE_AFTER = 0.18   # seconds without hands = the word is finished
 MIN_SIGN = 0.22     # shorter than this = a flicker, ignored
 MAX_SIGN = 2.0      # longer than this = finish anyway
 
@@ -33,12 +33,16 @@ def draw_text(img, msg, org, scale=1.0, color=(0, 255, 255), thick=2):
 
 
 class WordSegmenter:
-    """Feed it one MediaPipe result per frame. A word = from "hands appear" to "hands gone",
-    trimmed the same way as the training videos (extract_words.py).
+    """Feed it one MediaPipe result per frame. A word = from "hands appear" to "hands gone"
+    (or held steady for `still_after` seconds when enabled), trimmed like extract_words.py.
     update() returns the finished clip (3900 numbers) once, otherwise None."""
-    def __init__(self, max_sign=MAX_SIGN):
+    def __init__(self, max_sign=MAX_SIGN, still_after=None, still_thresh=0.016, min_still_start=0.35):
         self.max_sign = max_sign
+        self.still_after = still_after
+        self.still_thresh = still_thresh
+        self.min_still_start = min_still_start
         self.seq, self.start, self.last_hand = [], None, 0.0
+        self.still_since, self.prev_feat = None, None
 
     @property
     def active(self):
@@ -46,20 +50,42 @@ class WordSegmenter:
 
     def update(self, res, now):
         hand = bool(res.hand_landmarks)
+        feat = frame_features(res)
         if hand:
             self.last_hand = now
             if self.start is None:
                 self.start, self.seq = now, []
+                self.still_since = None
+            elif self.still_after is not None and self.prev_feat is not None:
+                mask = (feat != 0) | (self.prev_feat != 0)
+                delta = float(np.mean(np.abs(feat[mask] - self.prev_feat[mask]))) if mask.any() else 1.0
+                if now - self.start >= self.min_still_start and delta < self.still_thresh:
+                    self.still_since = self.still_since or now
+                else:
+                    self.still_since = None
+            self.prev_feat = feat
+        else:
+            self.still_since = None
+            self.prev_feat = None
         if self.start is None:
             return None
-        self.seq.append(frame_features(res))
-        if not ((not hand and now - self.last_hand >= GONE_AFTER) or now - self.start >= self.max_sign):
+        self.seq.append(feat)
+        still_done = (
+            self.still_after is not None
+            and self.still_since is not None
+            and now - self.still_since >= self.still_after
+        )
+        if not ((not hand and now - self.last_hand >= GONE_AFTER) or now - self.start >= self.max_sign or still_done):
             return None
         long_enough = self.last_hand - self.start >= MIN_SIGN
         arr, self.seq, self.start = np.array(self.seq), [], None
+        self.still_since = None
+        self.prev_feat = None
         if not long_enough:
             return None
         seen = np.where(arr.any(axis=1))[0]
+        if len(seen) == 0:
+            return None
         return clip_vector(arr[seen[0]:seen[-1] + 1]).astype(np.float32)
 
 
