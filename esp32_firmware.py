@@ -132,21 +132,25 @@ def _tread(c):
     return v
 
 def raw_touch():
-    """Median of 5 samples, or None if not pressed."""
-    if t_irq.value() != 0 and _tread(0xB0) < 100:
+    """Median of 7 samples, or None if not firmly pressed (rejects phantom/noise touches)."""
+    if t_irq.value() != 0:
+        return None
+    if _tread(0xB0) < 150:          # Z1 pressure too low = noise
         return None
     xs, ys = [], []
-    for _ in range(5):
+    for _ in range(7):
         xs.append(_tread(0xD0)); ys.append(_tread(0x90))
-    if _tread(0xB0) < 60 and t_irq.value() != 0:
+    if t_irq.value() != 0 or _tread(0xB0) < 150:
         return None  # released while sampling
     xs.sort(); ys.sort()
-    a, b = xs[2], ys[2]
-    if a < 50 or a > 4050 or b < 50 or b > 4050:
+    if xs[5] - xs[1] > 150 or ys[5] - ys[1] > 150:
+        return None  # samples disagree = noise
+    a, b = xs[3], ys[3]
+    if a < 100 or a > 4000 or b < 100 or b > 4000:
         return None
     return a, b
 
-CAL_FILE = "cal.txt"
+CAL_FILE = "cal2.txt"
 cal = None  # (swap, ax, bx, ay, by)
 
 def load_cal():
@@ -161,40 +165,78 @@ def load_cal():
 def to_screen(r):
     swap, ax, bx, ay, by = cal
     a, b = (r[1], r[0]) if swap else r
-    return (max(0, min(319, int(ax * a + bx))), max(0, min(239, int(ay * b + by))))
+    x, y = int(ax * a + bx), int(ay * b + by)
+    if x < -25 or x > 345 or y < -25 or y > 265:
+        return None  # far outside the panel = bad reading
+    return (max(0, min(319, x)), max(0, min(239, y)))
 
-def wait_tap():
+def wait_tap(timeout_ms=0):
+    """Wait for a firm, steady press (>= 4 agreeing reads), then for release."""
+    t0 = time.ticks_ms()
     while raw_touch():
         time.sleep_ms(20)
     while True:
+        if timeout_ms and time.ticks_diff(time.ticks_ms(), t0) > timeout_ms:
+            return None
         r = raw_touch()
         if r:
-            time.sleep_ms(60)
-            r2 = raw_touch() or r
-            while raw_touch():
-                time.sleep_ms(20)
-            return ((r[0] + r2[0]) // 2, (r[1] + r2[1]) // 2)
+            sa, sb, n = r[0], r[1], 1
+            for _ in range(6):
+                time.sleep_ms(15)
+                r2 = raw_touch()
+                if r2 and abs(r2[0] - r[0]) < 120 and abs(r2[1] - r[1]) < 120:
+                    sa += r2[0]; sb += r2[1]; n += 1
+            if n >= 4:
+                while raw_touch():
+                    time.sleep_ms(20)
+                time.sleep_ms(120)
+                return (sa // n, sb // n)
         time.sleep_ms(15)
 
+def _cal_screen(msg, px, py, col=YELLOW):
+    fill(0, 0, 320, 240, BG)
+    text(30, 95, 260, 50, msg, WHITE, BG)
+    fill(px - 12, py - 1, 25, 3, col); fill(px - 1, py - 12, 3, 25, col)
+
 def calibrate():
+    """4-point calibration with sanity checks and a verification tap; retries until good."""
     global cal
-    pts = ((20, 20), (300, 20), (20, 220))
-    raws = []
-    for i, (px, py) in enumerate(pts):
-        fill(0, 0, 320, 240, BG)
-        text(40, 100, 240, 40, "TOUCH CALIBRATION\nTap the cross (%d/3)" % (i + 1), WHITE, BG)
-        fill(px - 10, py - 1, 21, 3, YELLOW); fill(px - 1, py - 10, 3, 21, YELLOW)
-        raws.append(wait_tap())
-    (a1, b1), (a2, b2), (a3, b3) = raws
-    swap = abs(b2 - b1) > abs(a2 - a1)  # which raw channel moves with screen X
-    if swap:
-        a1, b1, a2, b2, a3, b3 = b1, a1, b2, a2, b3, a3
-    ax = 280 / ((a2 - a1) or 1); bx = 20 - ax * a1
-    ay = 200 / ((b3 - b1) or 1); by = 20 - ay * b1
-    cal = (swap, ax, bx, ay, by)
-    with open(CAL_FILE, "w") as f:
-        f.write("%d,%f,%f,%f,%f" % (1 if swap else 0, ax, bx, ay, by))
-    out("CAL:OK")
+    pts = ((24, 24), (296, 24), (24, 216), (296, 216))
+    for attempt in range(5):
+        raws = []
+        for i, (px, py) in enumerate(pts):
+            _cal_screen("TOUCH CALIBRATION\nPress & hold cross %d/4" % (i + 1), px, py)
+            raws.append(wait_tap())
+        (a1, b1), (a2, b2), (a3, b3), (a4, b4) = raws
+        swap = abs(b2 - b1) > abs(a2 - a1)  # which raw channel moves with screen X
+        if swap:
+            a1, b1, a2, b2, a3, b3, a4, b4 = b1, a1, b2, a2, b3, a3, b4, a4
+        dxa = ((a2 - a1) + (a4 - a3)) / 2   # raw span across 272 px
+        dyb = ((b3 - b1) + (b4 - b2)) / 2   # raw span across 192 px
+        ok = abs(dxa) > 800 and abs(dyb) > 600
+        # opposite edges must agree (rejects one bad tap)
+        ok = ok and abs((a2 - a1) - (a4 - a3)) < abs(dxa) * 0.35 and abs((b3 - b1) - (b4 - b2)) < abs(dyb) * 0.35
+        if not ok:
+            _cal_screen("Calibration not steady\nTry again, press firmly", 160, 200, RED)
+            time.sleep_ms(1200)
+            continue
+        ax = 272 / dxa; ay = 192 / dyb
+        bx = 24 - ax * (a1 + a3) / 2
+        by = 24 - ay * (b1 + b2) / 2
+        cal = (swap, ax, bx, ay, by)
+        # verification tap in the centre
+        _cal_screen("Tap the CENTER cross\nto confirm", 160, 170, GREEN)
+        r = wait_tap(15000)
+        p = to_screen(r) if r else None
+        if p and abs(p[0] - 160) < 28 and abs(p[1] - 170) < 28:
+            with open(CAL_FILE, "w") as f:
+                f.write("%d,%f,%f,%f,%f" % (1 if swap else 0, ax, bx, ay, by))
+            out("CAL:OK")
+            return
+        _cal_screen("Check failed (%s)\nStarting again" % (str(p) if p else "no tap"), 160, 200, RED)
+        time.sleep_ms(1500)
+    out("CAL:FAIL")
+    load_cal()
 
 # ------------------------------------------------------------------ Links
 uart = UART(2, baudrate=115200, tx=Pin(27), rx=Pin(22), timeout=0, rxbuf=2048)
@@ -506,7 +548,7 @@ def handle_line(line):
         out("PONG"); return
     if line == "INFO":
         gc.collect()
-        out("INFO:ver=11,font=%d,free=%d" % (len(_AR_FONT) if _AR_FONT else 0, gc.mem_free()))
+        out("INFO:ver=12,font=%d,free=%d,cal=%d" % (len(_AR_FONT) if _AR_FONT else 0, gc.mem_free(), 1 if cal else 0))
         return
     if line.startswith("OTA:"):
         _handle_ota(line); return
@@ -621,6 +663,7 @@ press_handled = False
 last_touch = 0
 last_link_check = 0
 last_gc = 0
+touch_hits = 0
 
 while True:
     now = time.ticks_ms()
@@ -662,18 +705,21 @@ while True:
         # --- Touch: edge triggered tap, 3 s hold on text area = recalibrate
         if time.ticks_diff(now, last_touch) >= 25:
             last_touch = now
-            r = raw_touch()
-            if r:
-                x, y = to_screen(r)
-                if pressed_since is None:
+            r = raw_touch() if cal else None
+            p = to_screen(r) if r else None
+            if p:
+                x, y = p
+                touch_hits += 1
+                if pressed_since is None and touch_hits >= 2:
                     pressed_since = now; press_handled = False
                     out("TOUCH:%d,%d" % (x, y))
                     if not (98 <= y < 160 or (160 <= y < 196 and x < 204)):
                         on_tap(x, y); press_handled = True
-                elif not press_handled and time.ticks_diff(now, pressed_since) > 3000:
+                elif pressed_since is not None and not press_handled and time.ticks_diff(now, pressed_since) > 3000:
                     press_handled = True
                     calibrate(); draw_all()
             else:
+                touch_hits = 0
                 pressed_since = None
 
         # --- Link watchdog: no message from laptop for 3 s => offline

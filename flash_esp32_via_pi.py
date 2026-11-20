@@ -114,7 +114,8 @@ def main():
         wait_for(ser, "OTA:BYE", timeout=1.5)
         ready = wait_for(ser, "READY", timeout=8.0)
         if not ready:
-            raise RuntimeError("ESP32 did not send READY after reboot")
+            print("[OTA] No READY yet (the screen may be showing touch calibration - tap the crosses).", flush=True)
+            return
         send_cmd(ser, "INFO")
         info_after = wait_for(ser, "INFO:", timeout=2.0)
         print("[OTA] Post-reboot:", info_after or ready, flush=True)
