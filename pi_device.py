@@ -64,7 +64,9 @@ class State:
         self.lang_gate = 0         # ignore sign/out lang older than the last local lang tap
         self.sign_lang = "asl"     # "asl" or "arsl"
         self.out_lang = "en"       # "en" or "ar"
-        self.ar_hex = ""           # pre-shaped 16x16 glyph indices for ESP32
+        self.ar_hex = ""           # pre-shaped 16px glyph indices for ESP32 text box
+        self.ar_hint_hex = ""      # pre-shaped Arabic hint indices for ESP32 bottom bar
+        self.ar_guess_hex = ""     # pre-shaped Arabic guess indices for ESP32 guess box
         self.speak_text = ""       # full UTF-8 text (including Arabic) for Speech
         self.vocab_mode = "30"
 
@@ -172,6 +174,7 @@ class Esp:
                 hint = st.hint
             return {"m": st.mode, "l": st.sign_lang, "o": st.out_lang,
                     "t": clean(st.text)[-60:], "u": st.ar_hex,
+                    "ia": st.ar_hint_hex, "ga": st.ar_guess_hex,
                     "h": int(bool(st.hand and ai and cam)),
                     "c": int(cam), "a": int(ai), "g": clean(st.guess)[:6], "i": clean(hint)[:26]}
 
@@ -182,6 +185,8 @@ class Esp:
             if c == "clear":
                 self.st.text = ""
                 self.st.ar_hex = ""
+                self.st.ar_hint_hex = ""
+                self.st.ar_guess_hex = ""
                 self.st.speak_text = ""
 
     def on_line(self, line):
@@ -205,6 +210,8 @@ class Esp:
                             st.out_lang = "ar"
                         st.text = ""
                         st.ar_hex = ""
+                        st.ar_hint_hex = ""
+                        st.ar_guess_hex = ""
                         st.speak_text = ""
                         st.hint = ""
                         st.lang_gate = st.seq + 1
@@ -328,6 +335,8 @@ def serve_ai(st, speech, conn):
                 st.ai = 1
                 st.hand = 1 if res.get("hand") else 0
                 st.guess, st.hint = res.get("guess", ""), res.get("hint", "")
+                st.ar_hint_hex = res.get("ar_hint_hex", "")
+                st.ar_guess_hex = res.get("ar_guess_hex", "")
                 if res.get("seq", 0) >= st.text_gate:
                     st.text = res.get("text", "")
                     st.ar_hex = res.get("ar_hex", "")

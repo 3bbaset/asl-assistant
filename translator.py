@@ -342,7 +342,8 @@ def shape_arabic(text):
         import arabic_reshaper
         from bidi.algorithm import get_display
         reshaped = arabic_reshaper.reshape(raw)
-        return get_display(reshaped)
+        has_ar = any("\u0600" <= ch <= "\u06ff" or "\ufe70" <= ch <= "\ufefc" for ch in raw)
+        return get_display(reshaped, base_dir="R" if has_ar else None)
     except Exception:
         return raw
 

@@ -215,7 +215,9 @@ def handle(b, hdr, jpg, last, gui, hub=None):
     last["text"] = text
     disp_mode = _combined_mode(b)
     ar_display = (translated or text) if b.out_lang == "ar" else ""
-    ar_hex = translator.encode_esp_arabic(ar_display) if ar_display else ""
+    ar_hex = translator.encode_esp_arabic(ar_display, max_chars=24) if ar_display else ""
+    ar_hint_hex = translator.encode_esp_arabic(res.get("hint_ar") or "", max_chars=24) if (res and b.out_lang == "ar" and res.get("hint_ar")) else ""
+    ar_guess_hex = translator.encode_esp_arabic(res.get("guess_ar") or "", max_chars=4) if (res and b.out_lang == "ar" and res.get("guess_ar")) else ""
     # ASCII-safe fallback for Pi state when output is Arabic
     esp_ascii = text if not any(ord(ch) >= 127 for ch in text) else ""
     if hub:
@@ -244,6 +246,8 @@ def handle(b, hdr, jpg, last, gui, hub=None):
         "full_text": translated or text,
         "translated_text": translated or "",
         "ar_hex": ar_hex,
+        "ar_hint_hex": ar_hint_hex,
+        "ar_guess_hex": ar_guess_hex,
         "hand": last["hand"],
         "guess": last["guess"] if not any(ord(ch) >= 127 for ch in str(last["guess"])) else "",
         "hint": last["hint"],

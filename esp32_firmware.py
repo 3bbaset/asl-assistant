@@ -209,7 +209,7 @@ MODES = (("ALPHA", "alphabets"), ("SPELL", "spelling"), ("W:30", "words"), ("W:2
 TAB_W = 64
 BUTTONS = (("SPACE", "CMD:SPACE", 0x2A69), ("DEL", "CMD:DEL", 0x52AA),
            ("CLEAR", "CMD:CLEAR", DKRED), ("SPEAK", "CMD:SPEAK", 0x0451))
-st = {"m": "", "l": "asl", "o": "en", "u": "", "t": None, "h": None, "c": None, "a": None, "g": None, "i": None, "link": None}
+st = {"m": "", "l": "asl", "o": "en", "u": "", "ia": "", "ga": "", "t": None, "h": None, "c": None, "a": None, "g": None, "i": None, "link": None}
 last_rx = 0
 try:
     with open("ar_font.bin", "rb") as _af:
@@ -219,63 +219,91 @@ except Exception:
 
 
 @micropython.native
-def _raster_ar_row(font_bytes, g_list, ng, r, fg_hi, fg_lo, bg_hi, bg_lo, dst):
+def _raster_ar_row(font_bytes, g_list, ng, r, scale, fg_hi, fg_lo, bg_hi, bg_lo, dst):
     di = 0
     for gi in range(ng):
-        g = g_list[gi]
-        off = g * 32 + r * 2
+        base = g_list[gi] * 33
+        adv = font_bytes[base]
+        off = base + 1 + r * 2
         b0 = font_bytes[off]
         b1 = font_bytes[off + 1]
-        mask = 0x80
-        for _ in range(8):
-            if b0 & mask:
-                dst[di] = fg_hi; dst[di + 1] = fg_lo
+        for col in range(adv):
+            if col < 8:
+                bit = b0 & (0x80 >> col)
             else:
-                dst[di] = bg_hi; dst[di + 1] = bg_lo
-            di += 2
-            mask >>= 1
-        mask = 0x80
-        for _ in range(8):
-            if b1 & mask:
-                dst[di] = fg_hi; dst[di + 1] = fg_lo
+                bit = b1 & (0x80 >> (col - 8))
+            if bit:
+                hi = fg_hi; lo = fg_lo
             else:
-                dst[di] = bg_hi; dst[di + 1] = bg_lo
-            di += 2
-            mask >>= 1
+                hi = bg_hi; lo = bg_lo
+            for _ in range(scale):
+                dst[di] = hi; dst[di + 1] = lo
+                di += 2
 
 
-def draw_ar_text(x, y, w, h, hex_str, fg, bg):
-    """Render up to 2 lines of pre-shaped 16x16 Arabic glyphs from hex indices ('FF' = newline)."""
+def draw_ar_text(x, y, w, h, hex_str, fg, bg, scale=1, align="r"):
+    """Render up to 2 lines of proportional 16px Arabic glyphs from hex indices ('FF' = newline)."""
     fill(x, y, w, h, bg)
     if not _AR_FONT or not hex_str:
         return
-    max_g = len(_AR_FONT) // 32
-    lines = []
+    max_g = len(_AR_FONT) // 33
+    if max_g <= 0:
+        return
+    raw_lines = []
     for seg in hex_str.split("FF"):
         gs = []
         for i in range(0, len(seg) - 1, 2):
             idx = int(seg[i:i + 2], 16)
             gs.append(idx if idx < max_g else 0)
         if gs:
-            lines.append(gs[:19])
-    lines = lines[:2]
+            raw_lines.append(gs)
+    raw_lines = raw_lines[:2]
+    if not raw_lines:
+        return
+
+    # Auto-upscale single short word/letter when box is tall enough
+    if len(raw_lines) == 1 and h >= 36 and scale == 1:
+        w1 = sum(_AR_FONT[g * 33] for g in raw_lines[0])
+        if w1 * 2 <= w - 10:
+            scale = 2
+
+    max_lw = (w - 8) // scale
+    lines = []
+    for gs in raw_lines:
+        trimmed = []
+        lw = 0
+        # Visual order is L->R; for RTL keep suffix (leftmost visual fits) or prefix safely within box
+        for g in gs:
+            gw = _AR_FONT[g * 33]
+            if lw + gw > max_lw:
+                break
+            trimmed.append(g)
+            lw += gw
+        if trimmed:
+            lines.append((trimmed, lw))
     if not lines:
         return
+
     fg_hi, fg_lo = fg >> 8, fg & 0xFF
     bg_hi, bg_lo = bg >> 8, bg & 0xFF
-    total_h = len(lines) * 18 - 2
+    lh = 16 * scale
+    gap = 4 if len(lines) > 1 else 0
+    total_h = len(lines) * lh + gap
     cy = y + max(0, (h - total_h) // 2)
-    for gs in lines:
-        ng = len(gs)
-        lw = ng * 16
-        gx = x + max(4, w - lw - 6)
-        row_buf = bytearray(lw * 2)
-        window(gx, cy, lw, 16)
+    for gs, lw in lines:
+        pw = lw * scale
+        if align == "c":
+            gx = x + max(2, (w - pw) // 2)
+        else:
+            gx = x + max(4, w - pw - 6)
+        row_buf = bytearray(pw * 2)
+        window(gx, cy, pw, lh)
         for r in range(16):
-            _raster_ar_row(_AR_FONT, gs, ng, r, fg_hi, fg_lo, bg_hi, bg_lo, row_buf)
-            spi.write(row_buf)
+            _raster_ar_row(_AR_FONT, gs, len(gs), r, scale, fg_hi, fg_lo, bg_hi, bg_lo, row_buf)
+            for _ in range(scale):
+                spi.write(row_buf)
         cs.value(1)
-        cy += 18
+        cy += lh + gap
 
 def draw_tabs(active):
     for i, (label, key) in enumerate(MODES):
@@ -312,6 +340,9 @@ def draw_hand():
         set_led(0, 0, 1)                       # blue: ready
 
 def draw_guess():
+    if st["o"] == "ar" and st["ga"] and _AR_FONT:
+        draw_ar_text(214, 40, 104, 54, st["ga"], CYAN, PANEL, scale=2, align="c")
+        return
     g = (st["g"] or "")[:6]
     if len(g) <= 2:
         text(214, 40, 104, 54, g or "-", CYAN, PANEL, 3 if g else 2)
@@ -334,6 +365,9 @@ def draw_text():
     text(2, 98, 316, 64, l1 + "\n" + l2, WHITE, DARK, 2, "l")
 
 def draw_hint():
+    if st["o"] == "ar" and st["ia"] and _AR_FONT:
+        draw_ar_text(2, 164, 206, 30, st["ia"], 0xBDF7, PANEL, scale=1, align="r")
+        return
     text(2, 164, 206, 30, (st["i"] or "")[:25], 0xBDF7, PANEL, 1)
 
 def draw_lang_toggles():
@@ -389,8 +423,13 @@ def handle_line(line):
             v = new[k] == "1"
             if v != st[k]:
                 st[k] = v; draw_cam(); draw_hand()
+    guess_dirty = False
+    if "ga" in new and new["ga"] != st["ga"]:
+        st["ga"] = new["ga"]; guess_dirty = True
     if "g" in new and new["g"] != st["g"]:
-        st["g"] = new["g"]; draw_guess()
+        st["g"] = new["g"]; guess_dirty = True
+    if guess_dirty or lang_dirty:
+        draw_guess()
     text_dirty = False
     if "u" in new and new["u"] != st["u"]:
         st["u"] = new["u"]; text_dirty = True
@@ -398,8 +437,13 @@ def handle_line(line):
         st["t"] = new["t"]; text_dirty = True
     if text_dirty or lang_dirty:
         draw_text()
+    hint_dirty = False
+    if "ia" in new and new["ia"] != st["ia"]:
+        st["ia"] = new["ia"]; hint_dirty = True
     if "i" in new and new["i"] != st["i"]:
-        st["i"] = new["i"]; draw_hint()
+        st["i"] = new["i"]; hint_dirty = True
+    if hint_dirty or lang_dirty:
+        draw_hint()
 
 def on_tap(x, y):
     if y < 38:
@@ -429,19 +473,19 @@ def on_tap(x, y):
             st["l"] = "arsl" if st["l"] == "asl" else "asl"
             if st["l"] == "arsl" and st["o"] == "en":
                 st["o"] = "ar"
-            st["u"] = ""; st["t"] = ""
-            draw_lang_toggles(); draw_text()
+            st["u"] = ""; st["t"] = ""; st["ia"] = ""; st["ga"] = ""
+            draw_lang_toggles(); draw_text(); draw_hint(); draw_guess()
             out("CMD:SIGN:" + st["l"])
         else:
             st["o"] = "ar" if st["o"] == "en" else "en"
-            draw_lang_toggles(); draw_text()
+            draw_lang_toggles(); draw_text(); draw_hint(); draw_guess()
             out("CMD:LANG:" + st["o"])
     elif y >= 196:
         i = min(3, x // 80)
         draw_buttons(i)
         out(BUTTONS[i][1])
         if BUTTONS[i][1] == "CMD:CLEAR":
-            st["t"] = ""; st["u"] = ""; draw_text()
+            st["t"] = ""; st["u"] = ""; st["ia"] = ""; st["ga"] = ""; draw_text(); draw_hint(); draw_guess()
         time.sleep_ms(90)
         draw_buttons()
 
@@ -470,7 +514,7 @@ while True:
         if b == b"\n" or b == b"\r":
             if rx_usb:
                 handle_line(rx_usb.decode("utf-8", "ignore")); rx_usb = bytearray()
-        elif len(rx_usb) < 200:
+        elif len(rx_usb) < 512:
             rx_usb.extend(b)
 
     # --- UART from Raspberry Pi (same protocol)
@@ -480,7 +524,7 @@ while True:
             if c in (10, 13):
                 if rx_uart:
                     handle_line(rx_uart.decode("utf-8", "ignore")); rx_uart = bytearray()
-            elif len(rx_uart) < 200:
+            elif len(rx_uart) < 512:
                 rx_uart.append(c)
 
     # --- Touch: edge triggered tap, 3 s hold on text area = recalibrate
