@@ -146,6 +146,12 @@ EN_TO_AR_WORDS = {
     "WHY": "لماذا",
     "HOW": "كيف",
     "WHEN": "متى",
+    "BED": "سرير",
+    "HUNGRY": "جائع",
+    "THIRSTY": "عطشان",
+    "UNDERSTAND": "يفهم",
+    "MEET": "يقابل",
+    "SOON": "قريباً",
 }
 
 # All 32 classes of arbml/ArSL21L (Arabic Sign Language Letters)

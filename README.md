@@ -19,22 +19,39 @@ A real-time **American Sign Language (ASL)** and **Arabic / Egyptian Sign Langua
                                                                                           http://127.0.0.1:8080
 ```
 
-* **ESP32 Display (`esp32_firmware.py` + `ar_font.bin`)**: 320×240 touch interface with 5 mode tabs (`ALPHA`, `SPELL`, `W:30`, `W:2K`, `SENT`), **`IN:ASL` / `IN:AR`** and **`OUT:EN` / `OUT:AR`** toggles, `SPACE`/`DEL`/`CLEAR`/`SPEAK` buttons, and a 16×16 RTL Arabic bitmap renderer.
-* **Raspberry Pi (`pi_device.py`)**: Streams camera frames over TCP `:9000`, bridges UART commands to/from the ESP32, and speaks English (`en-us`) or Arabic (`ar`) via `espeak-ng`.
-* **Laptop AI Engine (`ai_engine.py` + `brain.py`)**: Runs MediaPipe + ASL/ArSL models, offline-first EN↔AR translation (`translator.py`), `--gui` OpenCV debug window with dual-hand skeletons, and embeds the localhost Capstone Dashboard on port `8080`.
+* **ESP32 Display (`esp32_firmware.py` v12 + `ar_font.bin`)**: 320×240 touch interface with 5 mode tabs (`ALPHA`, `SPELL`, `W:30`, `W:2K`, `SENT`), **`IN:ASL` / `IN:AR`** and **`OUT:EN` / `OUT:AR`** toggles, `SPACE`/`DEL`/`CLEAR`/`SPEAK` buttons, 4-point verified touch calibration, a zero-flicker 20px Bold RTL Arabic bitmap renderer (`222` glyphs), and a 3-wire UART CRC32-verified OTA receiver (`flash_esp32_via_pi.py`).
+* **Raspberry Pi (`pi_device.py`)**: Streams `480×360` MJPEG camera frames over TCP `:9000` with event-driven zero-sleep forwarding, bridges UART commands to/from the ESP32 with urgent/cosmetic rate-limiting, and speaks English (`en-us`) or Arabic (`ar`) via `espeak-ng`.
+* **Laptop AI Engine (`ai_engine.py` + `brain.py` + `server.py`)**: Runs MediaPipe `RunningMode.VIDEO` ROI tracking + 6 ASL/ArSL models (including bit-exact vectorized `FastHGBClassifier`), offline-first EN↔AR translation (`translator.py`), `--gui` OpenCV debug window with dual-hand skeletons, and embeds the localhost Capstone Dashboard on port `8080`.
 
 ---
 
 ## Capstone Benchmark Results (`reports/capstone_metrics.json`)
 
-| Model | Track | Algorithm | Classes | Train / Test | Top-1 Acc | Top-3 Acc | Macro-F1 | Infer (ms) |
-| :--- | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **ASL Static Alphabet** | ASL | `HistGradientBoostingClassifier` | 24 | 46,964 / 12,068 | **98.10%** | 99.30% | 97.88% | 0.061 |
-| **ASL Motion Letters (J, Z, IDLE)** | ASL | `SVC` (5-fold GroupKFold OOF) | 3 | 104 / 130 | **97.69%** | — | 97.74% | 0.572 |
-| **ASL Conversational Words** | ASL | Soft-Voting Ensemble | 32 | 762 / 191 | **77.94%** | 90.20% | 76.00% | 0.470 |
-| **ASL Full Vocabulary** | ASL | `MLPClassifier` | 2,021 | 38,116 / 9,529 | **31.31%** | 47.58% | 29.64% | — |
-| **ArSL Alphabet (`arbml/ArSL21L`)** | ArSL | `MLPClassifier` | 32 | 11,063 / 2,766 | **96.89%** | 98.81% | 96.84% | 0.005 |
-| **ArSL Everyday Words (`KArSL-502`)** | ArSL | Ensemble (`MLP+ET+LGBM`) | 20 | 14,712 / 3,678 | **97.47%** | 99.89% | 97.50% | 0.130 |
+| Model ID | Task / Vocabulary | Track | Algorithm | Classes | Train / Test | Top-1 Acc | Top-3 Acc | Macro-F1 | Infer (ms) |
+| :--- | :--- | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`asl_alpha`** | **ASL Static Alphabet (`A–Z` sans `J/Z`)** | ASL | `HistGradientBoosting` (`FastHGB`) | 24 | 46,964 / 9,845 | **98.10%** | **99.30%** | **97.88%** | 0.061 |
+| **`asl_motion`** | **ASL Motion Letters (`J`, `Z`, `IDLE`)** | ASL | `SVC` (5-fold GroupKFold OOF) | 3 | 104 / 130 | **97.69%** | **100.00%** | **97.74%** | 0.572 |
+| **`asl_words_30`** | **ASL Core Conversational Words** | ASL | Soft-Voting Ensemble (`LR+MLP+ET`) | 32 | 812 / 204 | **88.24%** | **94.12%** *(Top-5: **95.59%**)* | **87.95%** | 0.450 |
+| **`asl_words_2021`** | **ASL Full WLASL Vocabulary (`W:2K`)** | ASL | `MLPClassifier` | 2,021 | 38,116 / 9,529 | **31.31%** | **47.58%** *(Top-5: **54.34%**)* | **29.64%** | 0.676 |
+| **`arsl_alpha`** | **ArSL Alphabet (`arbml/ArSL21L`)** | ArSL | `MLPClassifier` | 32 | 11,063 / 2,766 | **96.89%** | **98.81%** *(Top-5: **99.20%**)* | **96.84%** | 0.005 |
+| **`arsl_words_30`** | **ArSL Everyday Words (`KArSL-502`)** | ArSL | Ensemble (`MLP+ET+LGBM`) | 20 | 14,712 / 3,678 | **97.47%** | **99.89%** *(Top-5: **99.92%**)* | **97.50%** | 0.130 |
+
+### Understanding the Evaluation Metrics
+
+* **Top-1 Accuracy ("Exact First Guess")**: How often the model's **#1 highest-probability prediction** is the exact correct sign. On the device, Top-1 drives what is **typed into the main text box**, displayed in the **top-right `GUESS` square**, and **spoken aloud** by the speaker.
+* **Top-3 Accuracy ("Right Answer in Top 3 Candidates")**: How often the true sign appears among the model's **top 3 highest-probability predictions**. On the device, this powers the **bottom `HINT` bar** on the ESP32 and the **Top-3 candidate bars** on the web dashboard—demonstrating that even for visually similar handshapes, the correct sign is almost always surfaced among the top candidates (**94.12%** on ASL 32-Words, **99.89%** on ArSL 20-Words).
+* **Macro-F1 Score ("Balanced Fairness Across All Signs")**: The unweighted mean of per-class harmonic precision/recall scores across every class:
+  $$\text{F1}_c = \frac{2 \times \text{Precision}_c \times \text{Recall}_c}{\text{Precision}_c + \text{Recall}_c}, \qquad \text{Macro-F1} = \frac{1}{C}\sum_{c=1}^{C} \text{F1}_c$$
+  Unlike raw accuracy, Macro-F1 weights rare and frequent classes equally. Close alignment between Top-1 Accuracy and Macro-F1 across all models proves consistent recognition across the entire vocabulary rather than overfitting to majority classes.
+
+### System-Level Verification Summary
+
+* **`FastHGBClassifier` Numerical Exactness (`server.py`)**: Verified across held-out test frames from `data_all.csv` with **100.00% prediction agreement** (`max_prob_diff = 8.88e-16`, machine-epsilon exact) while accelerating single-frame ASL alphabet inference ~25×.
+* **Bilingual Translation & ESP32 20px Bold Arabic Bitmap Coverage (`translator.py` & `ar_font.bin`)**:
+  * **ArSL Letters (`32/32`)**: **100.0%** reshaped & encoded into valid 20px Bold Arabic glyph indices.
+  * **ArSL Words (`20/20`)**: **100.0%** reshaped & encoded cleanly.
+  * **ASL → Arabic Offline Dictionary Words (`107/107`)**: **100.0%** encoded with zero missing glyphs.
+  * **ASL → Arabic Conversational Phrases (`31/31`)**: **100.0%** wrapped (`/` multi-line delimiter) & encoded cleanly.
 
 ---
 
@@ -58,13 +75,17 @@ pip install -r requirements.txt
 .\.venv\Scripts\python.exe dashboard_server.py --port 8080
 ```
 
-### 3. Deploy to Raspberry Pi & Flash ESP32
+### 3. Deploy to Raspberry Pi & Flash ESP32 (USB or 3-Wire Pi-UART OTA)
 ```powershell
 # Deploy pi_device.py to raspberrypi.local and restart asl-device.service
 .\.venv\Scripts\python.exe deploy_pi.py
 
-# Flash esp32_firmware.py + 16x16 Arabic font atlas (ar_font.bin) over USB
-.\.venv\Scripts\python.exe flash_esp32.py COM15
+# Flash esp32_firmware.py + 20px Bold Arabic font atlas (ar_font.bin) over USB
+.\.venv\Scripts\python.exe flash_esp32.py COM13
+
+# Or update the enclosed ESP32 wirelessly over SSH via the Raspberry Pi's 3 UART wires (no USB needed):
+.\.venv\Scripts\python.exe flash_esp32_via_pi.py         # update main.py
+.\.venv\Scripts\python.exe flash_esp32_via_pi.py --all   # update main.py + ar_font.bin
 ```
 
 ### 4. Standalone Desktop Mode & Optional ArSL Fine-Tuning
@@ -85,9 +106,9 @@ pip install -r requirements.txt
 | Control | Behavior |
 | :--- | :--- |
 | **`ALPHA`** | Live letter inspection without typing (`A–Z` for ASL, 32 letters `أ–ي` for ArSL). |
-| **`SPELL`** | Fingerspelling typing engine with agreement hold (`0.6 s`) and `J/Z` motion replacement in ASL. |
-| **`W:30`** / **`W:2K`** | Single-word recognition (curated 32-word ASL / 20-word ArSL, or 2,021-word ASL). |
-| **`SENT`** | Paired with `W:30` or `W:2K`; chains signs (`3.0 s` max/sign) into formatted sentences & auto-speaks after `1.8 s`. |
+| **`SPELL`** | Fingerspelling typing engine with fast agreement hold (`0.28 s`) and `J/Z` motion replacement in ASL. |
+| **`W:30`** / **`W:2K`** | Single-word recognition (curated 32-word ASL at **88.24%** / 20-word ArSL at **97.47%** with `~0.75 s` stillness auto-commit, or 2,021-word ASL). |
+| **`SENT`** | Paired with `W:30` or `W:2K`; chains signs into formatted English or Arabic sentences & auto-speaks after a `1.2 s` natural pause. |
 | **`IN:ASL` / `IN:AR`** | Switches active recognition pipeline between ASL models and Arabic/Egyptian ArSL models. |
 | **`OUT:EN` / `OUT:AR`** | Translates recognized output to English or Arabic (offline curated dict + online fallback) and switches Pi speech (`en-us` / `ar`). |
 
